@@ -22,6 +22,35 @@
             <p class="text-gray-600" id="last-updated">Last updated: --</p>
         </header>
 
+        <!-- Alert Banner -->
+        <div id="alert-banner" class="hidden mb-6 p-4 rounded-lg border-l-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center">
+                    <span id="alert-icon" class="text-2xl mr-3"></span>
+                    <div>
+                        <p id="alert-title" class="font-semibold"></p>
+                        <p id="alert-message" class="text-sm"></p>
+                    </div>
+                </div>
+                <button onclick="showAlertDetails()" class="px-3 py-1 text-sm bg-white rounded border hover:bg-gray-50">
+                    View Details
+                </button>
+            </div>
+        </div>
+
+        <!-- Alert Details Modal -->
+        <div id="alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden">
+                <div class="p-4 border-b flex justify-between items-center">
+                    <h3 class="text-lg font-semibold">Positions Needing Attention</h3>
+                    <button onclick="hideAlertDetails()" class="text-gray-500 hover:text-gray-700">&times;</button>
+                </div>
+                <div id="alert-details" class="p-4 overflow-y-auto max-h-[60vh]">
+                    <p class="text-gray-500">Loading...</p>
+                </div>
+            </div>
+        </div>
+
         <!-- Portfolio Summary -->
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <div class="bg-white rounded-lg shadow-md p-6">
@@ -423,13 +452,120 @@
             }).join('');
         }
 
+        // Fetch alerts
+        async function fetchAlerts() {
+            try {
+                const response = await fetch(`${API_BASE}/alerts/positions-needing-attention`);
+                const data = await response.json();
+                updateAlertBanner(data);
+            } catch (error) {
+                console.error('Failed to fetch alerts:', error);
+            }
+        }
+
+        // Update alert banner
+        function updateAlertBanner(data) {
+            const banner = document.getElementById('alert-banner');
+            const icon = document.getElementById('alert-icon');
+            const title = document.getElementById('alert-title');
+            const message = document.getElementById('alert-message');
+
+            if (data.count === 0) {
+                banner.classList.add('hidden');
+                return;
+            }
+
+            banner.classList.remove('hidden');
+
+            if (data.has_critical) {
+                banner.className = 'mb-6 p-4 rounded-lg border-l-4 bg-red-50 border-red-500';
+                icon.textContent = '\u26a0\ufe0f';
+                title.textContent = 'Critical: Immediate action required';
+                title.className = 'font-semibold text-red-800';
+                message.textContent = `${data.count} position(s) need attention`;
+                message.className = 'text-sm text-red-600';
+            } else if (data.has_high) {
+                banner.className = 'mb-6 p-4 rounded-lg border-l-4 bg-orange-50 border-orange-500';
+                icon.textContent = '\u26a0\ufe0f';
+                title.textContent = 'Warning: Review recommended';
+                title.className = 'font-semibold text-orange-800';
+                message.textContent = `${data.count} position(s) need attention`;
+                message.className = 'text-sm text-orange-600';
+            } else {
+                banner.className = 'mb-6 p-4 rounded-lg border-l-4 bg-yellow-50 border-yellow-500';
+                icon.textContent = '\u2139\ufe0f';
+                title.textContent = 'Notice: Positions to monitor';
+                title.className = 'font-semibold text-yellow-800';
+                message.textContent = `${data.count} position(s) flagged for review`;
+                message.className = 'text-sm text-yellow-600';
+            }
+
+            // Store alerts data for modal
+            window.alertsData = data;
+        }
+
+        // Show alert details modal
+        function showAlertDetails() {
+            const modal = document.getElementById('alert-modal');
+            const details = document.getElementById('alert-details');
+
+            if (!window.alertsData || !window.alertsData.alerts) {
+                details.innerHTML = '<p class="text-gray-500">No alert data available</p>';
+            } else {
+                details.innerHTML = window.alertsData.alerts.map(alert => {
+                    const severityColors = {
+                        critical: 'bg-red-100 border-red-300 text-red-800',
+                        high: 'bg-orange-100 border-orange-300 text-orange-800',
+                        medium: 'bg-yellow-100 border-yellow-300 text-yellow-800',
+                        low: 'bg-gray-100 border-gray-300 text-gray-800',
+                    };
+                    const colorClass = severityColors[alert.severity] || severityColors.low;
+
+                    return `
+                        <div class="mb-4 p-4 border rounded-lg ${colorClass}">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <p class="font-semibold">${alert.market_title}</p>
+                                    <p class="text-sm">${alert.direction.toUpperCase()} | ${alert.cluster || 'Unclustered'}</p>
+                                </div>
+                                <span class="px-2 py-1 text-xs font-medium rounded uppercase">${alert.severity}</span>
+                            </div>
+                            <div class="text-sm mb-2">
+                                <span class="font-medium">Value:</span> ${formatCurrency(alert.current_value)} |
+                                <span class="font-medium">P&L:</span> <span class="${getPnlClass(alert.unrealized_pnl)}">${formatCurrency(alert.unrealized_pnl)}</span>
+                            </div>
+                            <div class="text-sm">
+                                <span class="font-medium">Issues:</span>
+                                <ul class="list-disc list-inside mt-1">
+                                    ${alert.reasons.map(r => `<li>${r}</li>`).join('')}
+                                </ul>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        // Hide alert details modal
+        function hideAlertDetails() {
+            document.getElementById('alert-modal').classList.add('hidden');
+        }
+
+        // Close modal on background click
+        document.getElementById('alert-modal').addEventListener('click', function(e) {
+            if (e.target === this) hideAlertDetails();
+        });
+
         // Initial load
         async function loadAll() {
             await Promise.all([
                 fetchPortfolio(),
                 fetchHistory(),
                 fetchExposure(),
-                fetchCatalysts()
+                fetchCatalysts(),
+                fetchAlerts()
             ]);
         }
 

@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
-from app.routers import portfolio_router, positions_router, exposure_router
+from app.routers import portfolio_router, positions_router, exposure_router, alerts_router
 from app.tasks import start_scheduler, shutdown_scheduler
 
 # Configure logging
@@ -56,6 +56,7 @@ app.add_middleware(
 app.include_router(portfolio_router)
 app.include_router(positions_router)
 app.include_router(exposure_router)
+app.include_router(alerts_router)
 
 
 @app.get("/health")
