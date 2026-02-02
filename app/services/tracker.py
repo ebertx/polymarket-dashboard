@@ -77,24 +77,40 @@ class TrackerService:
 
     async def _sync_positions(self, api_positions: List[Dict]) -> None:
         """Sync positions from API with database - update prices for open positions."""
-        # Get all open positions from DB
+        # Get all open positions from DB with their markets
         result = await self.db.execute(
             select(Position, Market)
             .outerjoin(Market, Position.market_id == Market.id)
             .where(Position.status == "open")
         )
-        db_positions = {
-            (row[1].clob_token_id_yes if row[0].direction == "yes" else row[1].clob_token_id_no): row[0]
-            for row in result.all()
-            if row[1] is not None
-        }
+        rows = result.all()
 
+        # Build lookup of token_id -> (position, market)
+        db_positions = {}
+        for row in rows:
+            position, market = row[0], row[1]
+            if market is not None:
+                token_id = market.clob_token_id_yes if position.direction == "yes" else market.clob_token_id_no
+                db_positions[token_id] = (position, market)
+
+        # Track which positions we found in API
+        found_token_ids = set()
+
+        # Build lookup of API positions by token_id
+        api_positions_by_token = {}
+        for pos_data in api_positions:
+            token_id = pos_data.get("token_id")
+            if token_id:
+                api_positions_by_token[token_id] = pos_data
+
+        # Update positions found in API
         for pos_data in api_positions:
             token_id = pos_data.get("token_id")
             if not token_id or token_id not in db_positions:
                 continue
 
-            position = db_positions[token_id]
+            found_token_ids.add(token_id)
+            position, market = db_positions[token_id]
             current_price = pos_data.get("current_price", Decimal("0"))
             value = pos_data.get("value", Decimal("0"))
 
@@ -111,6 +127,71 @@ class TrackerService:
                 value=value,
             )
             self.db.add(pos_snapshot)
+
+        # Check for positions NOT found in API - these may have resolved
+        now = datetime.now(timezone.utc)
+        for token_id, (position, market) in db_positions.items():
+            if token_id in found_token_ids:
+                continue
+
+            # Position not in API - check if market has resolved
+            market_resolved = False
+            resolution_outcome = None
+
+            if market.resolved_at is not None:
+                market_resolved = True
+                resolution_outcome = market.resolution_outcome
+            elif market.end_date is not None and market.end_date <= now:
+                # Market end date has passed - likely resolved
+                market_resolved = True
+                # Try to determine outcome from market data (we don't have it here,
+                # so we'll mark as resolved and set conservative P&L)
+                resolution_outcome = None
+
+            if market_resolved:
+                logger.info(
+                    f"Marking position {position.id} as closed - market '{market.title}' has resolved"
+                )
+
+                # Calculate realized P&L
+                # If we know the outcome, calculate properly
+                # If direction matches outcome, position paid out at $1.00
+                # If direction doesn't match, position paid out at $0.00
+                if resolution_outcome is not None:
+                    won = (position.direction == "yes" and resolution_outcome == "yes") or \
+                          (position.direction == "no" and resolution_outcome == "no")
+                    payout = position.shares * Decimal("1.0") if won else Decimal("0")
+                else:
+                    # Outcome unknown - use last known price or 0
+                    # Since position disappeared from API, assume it resolved
+                    # Conservative: assume we got current_price value (or 0 if unknown)
+                    last_price = position.current_price or Decimal("0")
+                    payout = position.shares * last_price
+
+                realized_pnl = payout - position.cost_basis
+
+                # Determine exit price
+                if resolution_outcome is not None:
+                    # Case-insensitive comparison for outcome
+                    outcome_lower = resolution_outcome.lower() if resolution_outcome else None
+                    direction_lower = position.direction.lower() if position.direction else None
+                    won = outcome_lower == direction_lower
+                    exit_price = Decimal("1.0") if won else Decimal("0")
+                else:
+                    # Outcome unknown - use last known price
+                    exit_price = position.current_price or Decimal("0")
+
+                # Update position as closed
+                position.status = "closed"
+                position.exit_date = market.resolved_at or now
+                position.exit_price = exit_price
+                position.realized_pnl = realized_pnl
+                position.current_value = Decimal("0")
+                position.unrealized_pnl = Decimal("0")
+
+                logger.info(
+                    f"Position {position.id} closed: realized_pnl=${realized_pnl:.2f}, exit_price={exit_price}"
+                )
 
     async def update_position_prices(self) -> int:
         """
