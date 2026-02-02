@@ -5,8 +5,6 @@ services:
     build: .
     container_name: polymarket-tracker
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     environment:
       - POSTGRES_HOST=${POSTGRES_HOST:-ebertx.duckdns.org}
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
@@ -16,6 +14,19 @@ services:
       - POLYMARKET_WALLET=${POLYMARKET_WALLET}
       - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD_HASH=${AUTH_PASSWORD_HASH}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+    labels:
+      # Traefik labels for reverse proxy
+      - "traefik.enable=true"
+      - "traefik.http.routers.polymarket.rule=Host(`polymarket.ebertx.com`)"
+      - "traefik.http.routers.polymarket.entrypoints=websecure"
+      - "traefik.http.routers.polymarket.tls=true"
+      - "traefik.http.routers.polymarket.tls.certresolver=letsencrypt"
+      - "traefik.http.services.polymarket.loadbalancer.server.port=8000"
+    networks:
+      - web
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -27,3 +38,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  web:
+    external: true

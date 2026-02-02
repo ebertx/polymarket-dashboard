@@ -2,6 +2,7 @@ import aiohttp
 import logging
 from decimal import Decimal
 from typing import Dict, List, Optional, Any
+from web3 import Web3
 
 logger = logging.getLogger(__name__)
 
@@ -9,20 +10,58 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 CLOB_API_BASE = "https://clob.polymarket.com"
 
+# Polygon RPC and USDC contract
+POLYGON_RPC = "https://polygon-rpc.com"
+USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e on Polygon
+
+# Minimal ERC20 ABI for balanceOf
+ERC20_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function",
+    }
+]
+
 
 class PolymarketClient:
     def __init__(self, wallet_address: str):
         self.wallet_address = wallet_address.lower()
         self._session: Optional[aiohttp.ClientSession] = None
+        self._web3: Optional[Web3] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
+    def _get_web3(self) -> Web3:
+        if self._web3 is None:
+            self._web3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
+        return self._web3
+
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
+
+    def get_usdc_balance(self) -> Decimal:
+        """Fetch USDC balance from Polygon network."""
+        try:
+            w3 = self._get_web3()
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(USDC_CONTRACT),
+                abi=ERC20_ABI
+            )
+            balance_wei = contract.functions.balanceOf(
+                Web3.to_checksum_address(self.wallet_address)
+            ).call()
+            # USDC has 6 decimals
+            return Decimal(balance_wei) / Decimal(10 ** 6)
+        except Exception as e:
+            logger.error(f"Failed to fetch USDC balance: {e}")
+            return Decimal("0")
 
     async def _request(self, url: str, params: Optional[Dict] = None) -> Any:
         session = await self._get_session()
@@ -80,11 +119,11 @@ class PolymarketClient:
                 logger.warning(f"Failed to process position: {pos}, error: {e}")
                 continue
 
-        # Note: USDC balance would require a Web3 call or separate API
-        # For now, we'll track positions only and set USDC to 0
-        # Can be enhanced later with Web3 integration
+        # Fetch USDC balance from Polygon
+        usdc_balance = self.get_usdc_balance()
+
         return {
-            "usdc_balance": Decimal("0"),
+            "usdc_balance": usdc_balance,
             "total_position_value": total_value,
             "positions": processed_positions,
         }
