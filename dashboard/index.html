@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Portfolio Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <style>
+        .pnl-positive { color: #10b981; }
+        .pnl-negative { color: #ef4444; }
+        .loading { opacity: 0.5; }
+        .card { @apply bg-white rounded-lg shadow-md p-6; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">Polymarket Portfolio</h1>
+            <p class="text-gray-600" id="last-updated">Last updated: --</p>
+        </header>
+
+        <!-- Portfolio Summary -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <p class="text-sm text-gray-500 uppercase tracking-wide">Total Value</p>
+                <p class="text-2xl font-bold text-gray-800" id="total-value">--</p>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <p class="text-sm text-gray-500 uppercase tracking-wide">Position Value</p>
+                <p class="text-2xl font-bold text-gray-800" id="position-value">--</p>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <p class="text-sm text-gray-500 uppercase tracking-wide">Cash (USDC)</p>
+                <p class="text-2xl font-bold text-gray-800" id="cash-balance">--</p>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <p class="text-sm text-gray-500 uppercase tracking-wide">Unrealized P&L</p>
+                <p class="text-2xl font-bold" id="unrealized-pnl">--</p>
+            </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <!-- Portfolio History Chart -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Portfolio Value History</h2>
+                <div style="height: 300px;">
+                    <canvas id="history-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Cluster Exposure Chart -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Cluster Exposure</h2>
+                <div style="height: 300px;">
+                    <canvas id="exposure-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Positions Table -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Open Positions</h2>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Market</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Shares</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Entry</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Current</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">P&L</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">P&L %</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-table" class="bg-white divide-y divide-gray-200">
+                        <tr>
+                            <td colspan="8" class="px-4 py-8 text-center text-gray-500">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Cluster Exposure Details -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Exposure by Cluster</h2>
+                <div id="cluster-list" class="space-y-3">
+                    <p class="text-gray-500">Loading...</p>
+                </div>
+            </div>
+
+            <!-- Upcoming Catalysts -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Upcoming Catalysts (7 days)</h2>
+                <div id="catalysts-list" class="space-y-3">
+                    <p class="text-gray-500">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="text-center text-gray-500 text-sm">
+            <p>Auto-refreshes every 60 seconds | <a href="/docs" class="text-blue-500 hover:underline">API Docs</a></p>
+        </footer>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let historyChart = null;
+        let exposureChart = null;
+
+        // Format currency
+        function formatCurrency(value) {
+            if (value === null || value === undefined) return '--';
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2
+            }).format(value);
+        }
+
+        // Format percentage
+        function formatPercent(value) {
+            if (value === null || value === undefined) return '--';
+            const sign = value >= 0 ? '+' : '';
+            return sign + (value * 100).toFixed(2) + '%';
+        }
+
+        // Get P&L class
+        function getPnlClass(value) {
+            if (value === null || value === undefined) return '';
+            return value >= 0 ? 'pnl-positive' : 'pnl-negative';
+        }
+
+        // Format price (0-1 range)
+        function formatPrice(value) {
+            if (value === null || value === undefined) return '--';
+            return (value * 100).toFixed(1) + '\u00A2';
+        }
+
+        // Fetch current portfolio
+        async function fetchPortfolio() {
+            try {
+                const response = await fetch(`${API_BASE}/portfolio/current`);
+                const data = await response.json();
+
+                document.getElementById('total-value').textContent = formatCurrency(data.total_value);
+                document.getElementById('position-value').textContent = formatCurrency(data.position_value);
+                document.getElementById('cash-balance').textContent = formatCurrency(data.cash_balance);
+
+                const pnlEl = document.getElementById('unrealized-pnl');
+                pnlEl.textContent = formatCurrency(data.unrealized_pnl);
+                pnlEl.className = `text-2xl font-bold ${getPnlClass(data.unrealized_pnl)}`;
+
+                if (data.last_updated) {
+                    document.getElementById('last-updated').textContent =
+                        `Last updated: ${new Date(data.last_updated).toLocaleString()}`;
+                }
+
+                updatePositionsTable(data.positions);
+            } catch (error) {
+                console.error('Failed to fetch portfolio:', error);
+            }
+        }
+
+        // Update positions table
+        function updatePositionsTable(positions) {
+            const tbody = document.getElementById('positions-table');
+
+            if (!positions || positions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">No open positions</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = positions.map(pos => {
+                const costBasis = pos.shares * pos.entry_price;
+                const pnlPct = costBasis > 0 ? (pos.unrealized_pnl / costBasis) : 0;
+
+                return `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-4 py-3 text-sm font-medium text-gray-900">${pos.market_title || 'Unknown'}</td>
+                        <td class="px-4 py-3 text-sm">
+                            <span class="px-2 py-1 rounded text-xs font-medium ${pos.direction === 'yes' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                                ${pos.direction.toUpperCase()}
+                            </span>
+                        </td>
+                        <td class="px-4 py-3 text-sm text-right text-gray-700">${parseFloat(pos.shares).toFixed(1)}</td>
+                        <td class="px-4 py-3 text-sm text-right text-gray-700">${formatPrice(pos.entry_price)}</td>
+                        <td class="px-4 py-3 text-sm text-right text-gray-700">${formatPrice(pos.current_price)}</td>
+                        <td class="px-4 py-3 text-sm text-right text-gray-700">${formatCurrency(pos.current_value)}</td>
+                        <td class="px-4 py-3 text-sm text-right font-medium ${getPnlClass(pos.unrealized_pnl)}">${formatCurrency(pos.unrealized_pnl)}</td>
+                        <td class="px-4 py-3 text-sm text-right font-medium ${getPnlClass(pnlPct)}">${formatPercent(pnlPct)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        // Fetch portfolio history
+        async function fetchHistory() {
+            try {
+                const response = await fetch(`${API_BASE}/portfolio/history?limit=200`);
+                const data = await response.json();
+
+                if (data.snapshots && data.snapshots.length > 0) {
+                    updateHistoryChart(data.snapshots);
+                }
+            } catch (error) {
+                console.error('Failed to fetch history:', error);
+            }
+        }
+
+        // Update history chart
+        function updateHistoryChart(snapshots) {
+            const ctx = document.getElementById('history-chart').getContext('2d');
+
+            const chartData = snapshots
+                .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                .map(s => ({
+                    x: new Date(s.timestamp),
+                    y: parseFloat(s.total_value)
+                }));
+
+            if (historyChart) {
+                historyChart.data.datasets[0].data = chartData;
+                historyChart.update();
+            } else {
+                historyChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: 'Portfolio Value',
+                            data: chartData,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 0,
+                            pointHitRadius: 10,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false }
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: 'day' },
+                                grid: { display: false }
+                            },
+                            y: {
+                                beginAtZero: false,
+                                ticks: {
+                                    callback: value => '$' + value.toFixed(0)
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        // Fetch cluster exposure
+        async function fetchExposure() {
+            try {
+                const response = await fetch(`${API_BASE}/exposure/clusters`);
+                const data = await response.json();
+
+                updateExposureChart(data);
+                updateClusterList(data);
+            } catch (error) {
+                console.error('Failed to fetch exposure:', error);
+            }
+        }
+
+        // Update exposure doughnut chart
+        function updateExposureChart(data) {
+            const ctx = document.getElementById('exposure-chart').getContext('2d');
+
+            const labels = [];
+            const values = [];
+            const colors = [
+                '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
+                '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'
+            ];
+
+            data.clusters.forEach((cluster, i) => {
+                labels.push(cluster.cluster_name);
+                values.push(cluster.total_value);
+            });
+
+            if (data.unclustered.total_value > 0) {
+                labels.push('Unclustered');
+                values.push(data.unclustered.total_value);
+            }
+
+            if (exposureChart) {
+                exposureChart.data.labels = labels;
+                exposureChart.data.datasets[0].data = values;
+                exposureChart.update();
+            } else {
+                exposureChart = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: values,
+                            backgroundColor: colors.slice(0, labels.length),
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: { boxWidth: 12 }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        // Update cluster list
+        function updateClusterList(data) {
+            const container = document.getElementById('cluster-list');
+            const totalValue = data.clusters.reduce((sum, c) => sum + c.total_value, 0) + data.unclustered.total_value;
+
+            let html = '';
+
+            data.clusters.forEach(cluster => {
+                const pct = totalValue > 0 ? (cluster.total_value / totalValue * 100) : 0;
+                const maxPct = cluster.max_exposure_pct || 20;
+                const isOverLimit = pct > maxPct;
+
+                html += `
+                    <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                            <p class="font-medium text-gray-800">${cluster.cluster_name}</p>
+                            <p class="text-sm text-gray-500">${cluster.position_count} positions</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="font-medium ${isOverLimit ? 'text-red-600' : 'text-gray-800'}">${formatCurrency(cluster.total_value)}</p>
+                            <p class="text-sm ${isOverLimit ? 'text-red-500' : 'text-gray-500'}">${pct.toFixed(1)}% / ${maxPct}%</p>
+                        </div>
+                    </div>
+                `;
+            });
+
+            if (data.unclustered.total_value > 0) {
+                const pct = totalValue > 0 ? (data.unclustered.total_value / totalValue * 100) : 0;
+                html += `
+                    <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                            <p class="font-medium text-gray-800">Unclustered</p>
+                            <p class="text-sm text-gray-500">${data.unclustered.position_count} positions</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="font-medium text-gray-800">${formatCurrency(data.unclustered.total_value)}</p>
+                            <p class="text-sm text-gray-500">${pct.toFixed(1)}%</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html || '<p class="text-gray-500">No cluster data</p>';
+        }
+
+        // Fetch upcoming catalysts
+        async function fetchCatalysts() {
+            try {
+                const response = await fetch(`${API_BASE}/catalysts/upcoming?days=7`);
+                const data = await response.json();
+
+                updateCatalystsList(data.catalysts);
+            } catch (error) {
+                console.error('Failed to fetch catalysts:', error);
+            }
+        }
+
+        // Update catalysts list
+        function updateCatalystsList(catalysts) {
+            const container = document.getElementById('catalysts-list');
+
+            if (!catalysts || catalysts.length === 0) {
+                container.innerHTML = '<p class="text-gray-500">No upcoming catalysts</p>';
+                return;
+            }
+
+            container.innerHTML = catalysts.map(cat => {
+                const urgencyClass = cat.days_until <= 1 ? 'border-red-400 bg-red-50' :
+                                    cat.days_until <= 3 ? 'border-yellow-400 bg-yellow-50' :
+                                    'border-gray-200 bg-gray-50';
+
+                return `
+                    <div class="p-3 rounded-lg border-l-4 ${urgencyClass}">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="font-medium text-gray-800">${cat.title}</p>
+                                <p class="text-sm text-gray-500">${cat.affected_cluster || 'No cluster'}</p>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-sm font-medium ${cat.days_until <= 1 ? 'text-red-600' : 'text-gray-700'}">
+                                    ${cat.days_until === 0 ? 'Today' : cat.days_until === 1 ? 'Tomorrow' : `${cat.days_until} days`}
+                                </p>
+                                ${cat.affected_position_value > 0 ? `<p class="text-xs text-gray-500">${formatCurrency(cat.affected_position_value)} at risk</p>` : ''}
+                            </div>
+                        </div>
+                        ${cat.recommended_action ? `<p class="text-sm text-blue-600 mt-1">Action: ${cat.recommended_action}</p>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Initial load
+        async function loadAll() {
+            await Promise.all([
+                fetchPortfolio(),
+                fetchHistory(),
+                fetchExposure(),
+                fetchCatalysts()
+            ]);
+        }
+
+        // Load on page ready
+        document.addEventListener('DOMContentLoaded', loadAll);
+
+        // Auto-refresh every 60 seconds
+        setInterval(loadAll, 60000);
+    </script>
+</body>
+</html>
