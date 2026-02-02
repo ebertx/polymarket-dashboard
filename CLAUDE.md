@@ -1,16 +1,28 @@
 # Claude Code Notes for Polymarket Tracker
 
+## Deployment
+
+Images are automatically built and pushed to GitHub Container Registry (ghcr.io) when code is merged to main. Watchtower automatically pulls new images.
+
+**Image**: `ghcr.io/ebertx/polymarket-dashboard:latest`
+
 ## Docker Commands
 
 This server does NOT have `docker-compose` or `docker compose` installed. Use direct `docker` commands instead.
 
-### Building the Image
+### Pull Latest Image
+
+```bash
+docker pull ghcr.io/ebertx/polymarket-dashboard:latest
+```
+
+### Building Locally (if needed)
 
 ```bash
 docker build -t polymarket-tracker -f /mnt/user/appdata/polymarket-tracker/Dockerfile /mnt/user/appdata/polymarket-tracker
 ```
 
-### Running the Container (with Traefik)
+### Running the Container (with Traefik + Watchtower)
 
 ```bash
 docker run -d \
@@ -24,12 +36,13 @@ docker run -d \
   --label "traefik.http.routers.polymarket.tls=true" \
   --label "traefik.http.routers.polymarket.tls.certresolver=letsencrypt" \
   --label "traefik.http.services.polymarket.loadbalancer.server.port=8000" \
+  --label "com.centurylinklabs.watchtower.enable=true" \
   --health-cmd "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"" \
   --health-interval 30s \
   --health-timeout 10s \
   --health-retries 3 \
   --health-start-period 10s \
-  polymarket-tracker
+  ghcr.io/ebertx/polymarket-dashboard:latest
 ```
 
 ### Stop and Remove Container

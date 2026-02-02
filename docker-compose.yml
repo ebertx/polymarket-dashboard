@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   polymarket-tracker:
-    build: .
+    image: ghcr.io/ebertx/polymarket-dashboard:latest
     container_name: polymarket-tracker
     restart: unless-stopped
     environment:
@@ -25,6 +25,8 @@ services:
       - "traefik.http.routers.polymarket.tls=true"
       - "traefik.http.routers.polymarket.tls.certresolver=letsencrypt"
       - "traefik.http.services.polymarket.loadbalancer.server.port=8000"
+      # Watchtower for auto-updates
+      - "com.centurylinklabs.watchtower.enable=true"
     networks:
       - web
     healthcheck:
