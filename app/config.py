@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Authentication
+    auth_username: str = "admin"
+    auth_password_hash: str = ""  # bcrypt hash of password
+    jwt_secret_key: str = "change-me-in-production"  # Used for signing JWT tokens
+
     @property
     def database_url(self) -> str:
         return (

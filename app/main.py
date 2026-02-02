@@ -8,8 +8,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
-from app.routers import portfolio_router, positions_router, exposure_router, alerts_router, freshness_router
+from app.routers import portfolio_router, positions_router, exposure_router, alerts_router, freshness_router, auth_router
 from app.tasks import start_scheduler, shutdown_scheduler
+from app.auth import AuthMiddleware
 
 # Configure logging
 settings = get_settings()
@@ -52,7 +53,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Authentication middleware (must be added after CORS)
+app.add_middleware(AuthMiddleware)
+
 # Include routers
+app.include_router(auth_router)  # Auth routes first (login, logout)
 app.include_router(portfolio_router)
 app.include_router(positions_router)
 app.include_router(exposure_router)
