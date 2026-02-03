@@ -99,7 +99,8 @@ class PolymarketClient:
         for pos in positions:
             try:
                 size = Decimal(str(pos.get("size", 0)))
-                current_price = Decimal(str(pos.get("currentPrice", 0)))
+                # API returns 'curPrice' not 'currentPrice'
+                current_price = Decimal(str(pos.get("curPrice", pos.get("currentPrice", 0))))
                 avg_price = Decimal(str(pos.get("avgPrice", 0)))
                 value = size * current_price
 
