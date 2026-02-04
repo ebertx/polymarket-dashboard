@@ -27,7 +27,7 @@ class Position(Base):
     cost_basis = Column(Numeric(18, 6), nullable=False)
     status = Column(position_status)
     thesis_status = Column(thesis_status_enum)
-    recommendation_id = Column(Integer, ForeignKey("recommendations.id"))
+    recommendation_id = Column(Integer)  # FK removed - recommendations table not yet implemented
     analysis_folder = Column(String(255))
     entry_reasoning = Column(Text)
     exit_reasoning = Column(Text)
