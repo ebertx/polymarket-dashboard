@@ -9,6 +9,20 @@ position_status = ENUM('open', 'closed', 'pending', name='position_status', crea
 thesis_status_enum = ENUM('intact', 'strengthened', 'weakened', 'degraded', 'invalidated', name='thesis_status', create_type=False)
 
 
+class Recommendation(Base):
+    """Stub model to register the recommendations table in ORM metadata.
+
+    The recommendations table exists in the database (created by polybot).
+    This stub prevents NoReferencedTableError when SQLAlchemy's mapper
+    encounters the FK constraint on positions.recommendation_id during
+    table sorting at flush time.
+    """
+    __tablename__ = "recommendations"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(Integer, primary_key=True)
+
+
 class Position(Base):
     __tablename__ = "positions"
 
@@ -27,7 +41,7 @@ class Position(Base):
     cost_basis = Column(Numeric(18, 6), nullable=False)
     status = Column(position_status)
     thesis_status = Column(thesis_status_enum)
-    recommendation_id = Column(Integer)  # FK removed - recommendations table not yet implemented
+    recommendation_id = Column(Integer, ForeignKey("recommendations.id"))
     analysis_folder = Column(String(255))
     entry_reasoning = Column(Text)
     exit_reasoning = Column(Text)
