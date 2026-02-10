@@ -113,6 +113,22 @@ class TrackerService:
             position, market = db_positions[token_id]
             current_price = pos_data.get("current_price", Decimal("0"))
             value = pos_data.get("value", Decimal("0"))
+            api_size = pos_data.get("size")
+
+            # Sync share count if API reports different size (e.g., partial sell)
+            if api_size is not None:
+                api_shares = Decimal(str(api_size))
+                if api_shares != position.shares and api_shares > 0:
+                    old_shares = position.shares
+                    shares_sold = old_shares - api_shares
+                    # Adjust cost basis proportionally
+                    if old_shares > 0:
+                        position.cost_basis = position.cost_basis * (api_shares / old_shares)
+                    position.shares = api_shares
+                    logger.info(
+                        f"Position {position.id} shares updated: {old_shares} -> {api_shares} "
+                        f"(sold {shares_sold})"
+                    )
 
             # Update position
             position.current_price = current_price
@@ -191,6 +207,29 @@ class TrackerService:
 
                 logger.info(
                     f"Position {position.id} closed: realized_pnl=${realized_pnl:.2f}, exit_price={exit_price}"
+                )
+            else:
+                # Position not in API and market hasn't resolved = manual exit
+                # The user sold all shares outside the tracker
+                logger.info(
+                    f"Position {position.id} not in API but market '{market.title}' still active - "
+                    f"treating as manual exit"
+                )
+
+                exit_price = position.current_price or Decimal("0")
+                realized_pnl = (position.shares * exit_price) - position.cost_basis
+
+                position.status = "closed"
+                position.exit_date = now
+                position.exit_price = exit_price
+                position.realized_pnl = realized_pnl
+                position.current_value = Decimal("0")
+                position.unrealized_pnl = Decimal("0")
+                position.exit_reasoning = "Auto-detected: position disappeared from API (manual exit)"
+
+                logger.info(
+                    f"Position {position.id} closed (manual exit): "
+                    f"exit_price={exit_price}, realized_pnl=${realized_pnl:.2f}"
                 )
 
     async def update_position_prices(self) -> int:
