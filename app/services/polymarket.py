@@ -140,13 +140,15 @@ class PolymarketClient:
             asks = data.get("asks", [])
 
             if bids and asks:
-                best_bid = Decimal(str(bids[0].get("price", 0)))
-                best_ask = Decimal(str(asks[0].get("price", 0)))
+                # CLOB returns bids ascending and asks descending (worst-first),
+                # so use max/min to get the best bid/ask regardless of sort order
+                best_bid = max(Decimal(str(b.get("price", 0))) for b in bids)
+                best_ask = min(Decimal(str(a.get("price", 0))) for a in asks)
                 return (best_bid + best_ask) / 2
             elif bids:
-                return Decimal(str(bids[0].get("price", 0)))
+                return max(Decimal(str(b.get("price", 0))) for b in bids)
             elif asks:
-                return Decimal(str(asks[0].get("price", 0)))
+                return min(Decimal(str(a.get("price", 0))) for a in asks)
             return None
         except Exception as e:
             logger.warning(f"Failed to fetch price for {token_id}: {e}")
