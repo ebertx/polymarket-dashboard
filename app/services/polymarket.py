@@ -10,8 +10,12 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 CLOB_API_BASE = "https://clob.polymarket.com"
 
-# Polygon RPC and USDC contract
-POLYGON_RPC = "https://polygon-rpc.com"
+# Polygon RPC and USDC contract (list of fallbacks in priority order)
+POLYGON_RPC_LIST = [
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://1rpc.io/matic",
+    "https://polygon-rpc.com",
+]
 USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e on Polygon
 
 # Minimal ERC20 ABI for balanceOf
@@ -39,7 +43,18 @@ class PolymarketClient:
 
     def _get_web3(self) -> Web3:
         if self._web3 is None:
-            self._web3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
+            for rpc in POLYGON_RPC_LIST:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 10}))
+                    # Quick connectivity test
+                    w3.eth.chain_id
+                    self._web3 = w3
+                    logger.info(f"Connected to Polygon RPC: {rpc}")
+                    break
+                except Exception as e:
+                    logger.warning(f"Polygon RPC {rpc} failed: {e}")
+            if self._web3 is None:
+                raise RuntimeError("All Polygon RPC endpoints failed")
         return self._web3
 
     async def close(self):
