@@ -146,10 +146,31 @@ class TrackerService:
 
         # Check for positions NOT found in API - these may have resolved
         now = datetime.now(timezone.utc)
-        for token_id, (position, market) in db_positions.items():
-            if token_id in found_token_ids:
-                continue
+        missing_positions = {
+            token_id: (position, market)
+            for token_id, (position, market) in db_positions.items()
+            if token_id not in found_token_ids
+        }
 
+        # SAFETY: If ALL (or nearly all) positions disappeared at once, this is
+        # almost certainly an API failure, not real position closures.
+        # Only proceed with closure logic if at least some positions were matched.
+        if missing_positions and not found_token_ids and len(db_positions) > 1:
+            logger.warning(
+                f"ALL {len(db_positions)} positions missing from API response — "
+                f"likely API failure. Skipping position closure logic."
+            )
+            return
+
+        if len(missing_positions) > 2 and len(found_token_ids) < len(db_positions) * 0.3:
+            logger.warning(
+                f"{len(missing_positions)}/{len(db_positions)} positions missing from API "
+                f"(only {len(found_token_ids)} matched). Possible API issue — "
+                f"skipping closure logic to avoid mass false-closes."
+            )
+            return
+
+        for token_id, (position, market) in missing_positions.items():
             # Position not in API - check if market has resolved
             market_resolved = False
             resolution_outcome = None
@@ -160,8 +181,6 @@ class TrackerService:
             elif market.end_date is not None and market.end_date <= now:
                 # Market end date has passed - likely resolved
                 market_resolved = True
-                # Try to determine outcome from market data (we don't have it here,
-                # so we'll mark as resolved and set conservative P&L)
                 resolution_outcome = None
 
             if market_resolved:
@@ -169,35 +188,24 @@ class TrackerService:
                     f"Marking position {position.id} as closed - market '{market.title}' has resolved"
                 )
 
-                # Calculate realized P&L
-                # If we know the outcome, calculate properly
-                # If direction matches outcome, position paid out at $1.00
-                # If direction doesn't match, position paid out at $0.00
                 if resolution_outcome is not None:
                     won = (position.direction == "yes" and resolution_outcome == "yes") or \
                           (position.direction == "no" and resolution_outcome == "no")
                     payout = position.shares * Decimal("1.0") if won else Decimal("0")
                 else:
-                    # Outcome unknown - use last known price or 0
-                    # Since position disappeared from API, assume it resolved
-                    # Conservative: assume we got current_price value (or 0 if unknown)
                     last_price = position.current_price or Decimal("0")
                     payout = position.shares * last_price
 
                 realized_pnl = payout - position.cost_basis
 
-                # Determine exit price
                 if resolution_outcome is not None:
-                    # Case-insensitive comparison for outcome
                     outcome_lower = resolution_outcome.lower() if resolution_outcome else None
                     direction_lower = position.direction.lower() if position.direction else None
                     won = outcome_lower == direction_lower
                     exit_price = Decimal("1.0") if won else Decimal("0")
                 else:
-                    # Outcome unknown - use last known price
                     exit_price = position.current_price or Decimal("0")
 
-                # Update position as closed
                 position.status = "closed"
                 position.exit_date = market.resolved_at or now
                 position.exit_price = exit_price
@@ -209,27 +217,13 @@ class TrackerService:
                     f"Position {position.id} closed: realized_pnl=${realized_pnl:.2f}, exit_price={exit_price}"
                 )
             else:
-                # Position not in API and market hasn't resolved = manual exit
-                # The user sold all shares outside the tracker
-                logger.info(
-                    f"Position {position.id} not in API but market '{market.title}' still active - "
-                    f"treating as manual exit"
-                )
-
-                exit_price = position.current_price or Decimal("0")
-                realized_pnl = (position.shares * exit_price) - position.cost_basis
-
-                position.status = "closed"
-                position.exit_date = now
-                position.exit_price = exit_price
-                position.realized_pnl = realized_pnl
-                position.current_value = Decimal("0")
-                position.unrealized_pnl = Decimal("0")
-                position.exit_reasoning = "Auto-detected: position disappeared from API (manual exit)"
-
-                logger.info(
-                    f"Position {position.id} closed (manual exit): "
-                    f"exit_price={exit_price}, realized_pnl=${realized_pnl:.2f}"
+                # Position not in API and market hasn't resolved.
+                # Log warning but do NOT auto-close — require manual confirmation.
+                # This prevents accidental mass-closure from API hiccups.
+                logger.warning(
+                    f"Position {position.id} ('{market.title}') not found in API but market "
+                    f"still active. NOT auto-closing — may be API issue or manual exit. "
+                    f"Use /api/v1/positions/{position.id} to manually close if confirmed."
                 )
 
     async def update_position_prices(self) -> int:
