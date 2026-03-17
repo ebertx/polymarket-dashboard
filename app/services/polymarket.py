@@ -199,3 +199,24 @@ class PolymarketClient:
         except Exception as e:
             logger.warning(f"Market search failed: {e}")
             return []
+
+    async def lookup_market_by_token_id(self, token_id: str) -> Optional[Dict]:
+        """Look up market metadata from Gamma API by CLOB token ID.
+
+        Uses a User-Agent header because the Gamma API blocks default Python user-agents.
+        """
+        url = f"{GAMMA_API_BASE}/markets"
+        params = {"clob_token_ids": token_id}
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        session = await self._get_session()
+        try:
+            async with session.get(url, params=params, headers=headers, timeout=30) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return data[0]
+                return None
+        except Exception as e:
+            logger.warning(f"Gamma API lookup failed for token {token_id}: {e}")
+            return None

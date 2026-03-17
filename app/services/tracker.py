@@ -1,3 +1,4 @@
+import json
 import logging
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -10,6 +11,13 @@ from app.models import PortfolioSnapshot, Position, PositionSnapshot, Market
 from app.services.polymarket import PolymarketClient
 
 logger = logging.getLogger(__name__)
+
+# Module-level miss counter that persists across TrackerService instances
+# within the same process. Keyed by position ID.
+_api_miss_counts: Dict[int, int] = {}
+
+# Number of consecutive misses before auto-closing a sold position
+AUTO_CLOSE_MISS_THRESHOLD = 3
 
 
 class TrackerService:
@@ -103,6 +111,13 @@ class TrackerService:
             if token_id:
                 api_positions_by_token[token_id] = pos_data
 
+        # Collect unknown token_ids for auto-discovery
+        unknown_api_positions = []
+        for pos_data in api_positions:
+            token_id = pos_data.get("token_id")
+            if token_id and token_id not in db_positions:
+                unknown_api_positions.append(pos_data)
+
         # Update positions found in API
         for pos_data in api_positions:
             token_id = pos_data.get("token_id")
@@ -111,6 +126,10 @@ class TrackerService:
 
             found_token_ids.add(token_id)
             position, market = db_positions[token_id]
+
+            # Reset miss counter — position is present in API
+            _api_miss_counts.pop(position.id, None)
+
             current_price = pos_data.get("current_price", Decimal("0"))
             value = pos_data.get("value", Decimal("0"))
             api_size = pos_data.get("size")
@@ -143,6 +162,10 @@ class TrackerService:
                 value=value,
             )
             self.db.add(pos_snapshot)
+
+        # Auto-discover new positions not yet in DB
+        if unknown_api_positions:
+            await self._auto_discover_positions(unknown_api_positions)
 
         # Check for positions NOT found in API - these may have resolved
         now = datetime.now(timezone.utc)
@@ -218,13 +241,218 @@ class TrackerService:
                 )
             else:
                 # Position not in API and market hasn't resolved.
-                # Log warning but do NOT auto-close — require manual confirmation.
-                # This prevents accidental mass-closure from API hiccups.
-                logger.warning(
-                    f"Position {position.id} ('{market.title}') not found in API but market "
-                    f"still active. NOT auto-closing — may be API issue or manual exit. "
-                    f"Use /api/v1/positions/{position.id} to manually close if confirmed."
+                # Track consecutive misses and auto-close after threshold,
+                # but only if enough other positions were found (guards against API outage).
+                miss_count = _api_miss_counts.get(position.id, 0) + 1
+                _api_miss_counts[position.id] = miss_count
+
+                if miss_count >= AUTO_CLOSE_MISS_THRESHOLD and len(found_token_ids) >= 2:
+                    # Position has been absent for 3+ consecutive sync cycles
+                    # and the API is returning other positions (not an outage).
+                    logger.info(
+                        f"Auto-closing position {position.id} ('{market.title}'): "
+                        f"absent from API for {miss_count} consecutive sync cycles. "
+                        f"Likely sold externally."
+                    )
+                    last_price = position.current_price or Decimal("0")
+                    payout = position.shares * last_price
+                    realized_pnl = payout - position.cost_basis
+
+                    position.status = "closed"
+                    position.exit_date = now
+                    position.exit_price = last_price
+                    position.realized_pnl = realized_pnl
+                    position.current_value = Decimal("0")
+                    position.unrealized_pnl = Decimal("0")
+                    position.exit_reasoning = (
+                        f"auto-closed: position absent from API for {miss_count} sync cycles"
+                    )
+
+                    # Clean up miss counter
+                    _api_miss_counts.pop(position.id, None)
+
+                    logger.info(
+                        f"Position {position.id} auto-closed: "
+                        f"realized_pnl=${realized_pnl:.2f}, exit_price={last_price}"
+                    )
+                else:
+                    logger.warning(
+                        f"Position {position.id} ('{market.title}') not found in API but market "
+                        f"still active (miss {miss_count}/{AUTO_CLOSE_MISS_THRESHOLD}). "
+                        f"Will auto-close after {AUTO_CLOSE_MISS_THRESHOLD} consecutive misses."
+                    )
+
+    async def _auto_discover_positions(self, unknown_positions: List[Dict]) -> None:
+        """Auto-discover and create DB records for positions found in API but not in DB.
+
+        For each unknown position:
+        1. Look up market metadata from Gamma API by token_id
+        2. Create Market row if it doesn't exist
+        3. Create Position row
+        """
+        now = datetime.now(timezone.utc)
+
+        for pos_data in unknown_positions:
+            token_id = pos_data.get("token_id")
+            if not token_id:
+                continue
+
+            try:
+                # Look up market metadata from Gamma API
+                market_data = await self.client.lookup_market_by_token_id(token_id)
+                if not market_data:
+                    logger.warning(
+                        f"Auto-discover: Gamma API returned no data for token {token_id}. Skipping."
+                    )
+                    continue
+
+                # Parse market metadata
+                condition_id = market_data.get("conditionId") or market_data.get("condition_id", "")
+                title = market_data.get("question") or market_data.get("title", "Unknown Market")
+                slug = market_data.get("slug", f"unknown-{condition_id[:20]}")
+                description = market_data.get("description", "")
+                end_date_str = market_data.get("endDate") or market_data.get("end_date_iso")
+
+                # Parse clobTokenIds — comes as JSON string like '["yes_token", "no_token"]'
+                clob_token_ids_raw = market_data.get("clobTokenIds", "[]")
+                if isinstance(clob_token_ids_raw, str):
+                    try:
+                        clob_token_ids = json.loads(clob_token_ids_raw)
+                    except json.JSONDecodeError:
+                        clob_token_ids = []
+                elif isinstance(clob_token_ids_raw, list):
+                    clob_token_ids = clob_token_ids_raw
+                else:
+                    clob_token_ids = []
+
+                if len(clob_token_ids) < 2:
+                    logger.warning(
+                        f"Auto-discover: Market '{title}' has {len(clob_token_ids)} token IDs "
+                        f"(expected 2). Skipping."
+                    )
+                    continue
+
+                clob_token_id_yes = clob_token_ids[0]
+                clob_token_id_no = clob_token_ids[1]
+
+                # Determine direction based on which token matches
+                if token_id == clob_token_id_yes:
+                    direction = "yes"
+                elif token_id == clob_token_id_no:
+                    direction = "no"
+                else:
+                    logger.warning(
+                        f"Auto-discover: Token {token_id} doesn't match either YES ({clob_token_id_yes}) "
+                        f"or NO ({clob_token_id_no}) for market '{title}'. Skipping."
+                    )
+                    continue
+
+                # Parse end_date
+                end_date = None
+                if end_date_str:
+                    try:
+                        end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+                    except (ValueError, AttributeError):
+                        pass
+
+                # Check if market already exists by condition_id or slug
+                existing_market = None
+                if condition_id:
+                    result = await self.db.execute(
+                        select(Market).where(Market.condition_id == condition_id)
+                    )
+                    existing_market = result.scalar_one_or_none()
+
+                if existing_market is None:
+                    result = await self.db.execute(
+                        select(Market).where(Market.slug == slug)
+                    )
+                    existing_market = result.scalar_one_or_none()
+
+                if existing_market:
+                    market = existing_market
+                    # Update token IDs if missing
+                    if not market.clob_token_id_yes:
+                        market.clob_token_id_yes = clob_token_id_yes
+                    if not market.clob_token_id_no:
+                        market.clob_token_id_no = clob_token_id_no
+                    logger.info(
+                        f"Auto-discover: Using existing market '{market.title}' (id={market.id})"
+                    )
+                else:
+                    market = Market(
+                        slug=slug,
+                        title=title,
+                        description=description,
+                        condition_id=condition_id,
+                        clob_token_id_yes=clob_token_id_yes,
+                        clob_token_id_no=clob_token_id_no,
+                        end_date=end_date,
+                    )
+                    self.db.add(market)
+                    await self.db.flush()  # Get the market.id
+                    logger.info(
+                        f"Auto-discover: Created new market '{title}' (id={market.id}, slug={slug})"
+                    )
+
+                # Check if an open position already exists for this market+direction
+                result = await self.db.execute(
+                    select(Position).where(
+                        Position.market_id == market.id,
+                        Position.direction == direction,
+                        Position.status == "open",
+                    )
                 )
+                existing_position = result.scalar_one_or_none()
+                if existing_position:
+                    logger.info(
+                        f"Auto-discover: Position already exists for '{title}' {direction} "
+                        f"(id={existing_position.id}). Skipping."
+                    )
+                    continue
+
+                # Create position
+                shares = pos_data.get("size", Decimal("0"))
+                if isinstance(shares, (int, float, str)):
+                    shares = Decimal(str(shares))
+                avg_price = pos_data.get("avg_price", Decimal("0"))
+                if isinstance(avg_price, (int, float, str)):
+                    avg_price = Decimal(str(avg_price))
+                current_price = pos_data.get("current_price", Decimal("0"))
+                if isinstance(current_price, (int, float, str)):
+                    current_price = Decimal(str(current_price))
+
+                cost_basis = shares * avg_price
+                current_value = shares * current_price
+                unrealized_pnl = current_value - cost_basis
+
+                position = Position(
+                    market_id=market.id,
+                    direction=direction,
+                    shares=shares,
+                    entry_price=avg_price,
+                    entry_date=now,
+                    current_price=current_price,
+                    current_value=current_value,
+                    cost_basis=cost_basis,
+                    unrealized_pnl=unrealized_pnl,
+                    status="open",
+                    entry_reasoning="auto-discovered: position found in API but not in tracking DB",
+                )
+                self.db.add(position)
+
+                logger.info(
+                    f"Auto-discover: Created position for '{title}' — "
+                    f"{shares} {direction.upper()} @ {avg_price} (value=${current_value:.2f})"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Auto-discover: Failed to process token {token_id}: {e}",
+                    exc_info=True,
+                )
+                # Continue with next position — don't let one failure stop others
+                continue
 
     async def update_position_prices(self) -> int:
         """
