@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timezone
-from typing import List
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal
+from typing import List, Dict
 
 from app.database import get_db
 from app.config import get_settings
-from app.models import Position, PositionSnapshot, Market
+from app.models import Position, PositionSnapshot, Market, Cluster, AlertDefinition
 from app.schemas.position import (
     PositionResponse,
     PositionCreate,
@@ -58,6 +59,238 @@ async def list_positions(
         )
         for position, market in rows
     ]
+
+
+@router.get("/sparklines")
+async def get_sparklines(
+    days: int = Query(default=7, ge=1, le=90),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get downsampled price history for all open positions (1 point per day).
+
+    Returns a dict keyed by position ID with arrays of {date, price, value}.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Get open position IDs
+    open_result = await db.execute(
+        select(Position.id).where(Position.status == "open")
+    )
+    open_ids = [row[0] for row in open_result.all()]
+
+    if not open_ids:
+        return {}
+
+    # For each day, take the last snapshot (max timestamp per day per position).
+    # We use a subquery to find the max snapshot id per (position_id, date) bucket,
+    # then join back to get the actual price/value.
+    #
+    # Step 1: get max id per (position_id, date)
+    date_expr = sa_func.date(PositionSnapshot.timestamp)
+    max_id_subq = (
+        select(
+            sa_func.max(PositionSnapshot.id).label("max_id"),
+        )
+        .where(
+            PositionSnapshot.position_id.in_(open_ids),
+            PositionSnapshot.timestamp >= cutoff,
+        )
+        .group_by(PositionSnapshot.position_id, date_expr)
+        .subquery()
+    )
+
+    # Step 2: fetch those snapshots
+    result = await db.execute(
+        select(
+            PositionSnapshot.position_id,
+            PositionSnapshot.timestamp,
+            PositionSnapshot.price,
+            PositionSnapshot.value,
+        )
+        .where(PositionSnapshot.id.in_(select(max_id_subq.c.max_id)))
+        .order_by(PositionSnapshot.position_id, PositionSnapshot.timestamp)
+    )
+    rows = result.all()
+
+    # Build response dict
+    sparklines: Dict[str, list] = {}
+    for pos_id, ts, price, value in rows:
+        key = str(pos_id)
+        if key not in sparklines:
+            sparklines[key] = []
+        sparklines[key].append({
+            "date": ts.strftime("%Y-%m-%d"),
+            "price": float(price) if price is not None else None,
+            "value": float(value) if value is not None else None,
+        })
+
+    return sparklines
+
+
+@router.get("/closed/summary")
+async def get_closed_positions_summary(
+    db: AsyncSession = Depends(get_db),
+):
+    """Get summary statistics for all closed positions."""
+    result = await db.execute(
+        select(Position, Market)
+        .outerjoin(Market, Position.market_id == Market.id)
+        .where(Position.status == "closed")
+        .order_by(Position.exit_date.desc())
+    )
+    rows = result.all()
+
+    positions_list = []
+    wins = 0
+    losses = 0
+    total_realized_pnl = Decimal("0")
+    win_pnls = []
+    loss_pnls = []
+
+    for position, market in rows:
+        pnl = position.realized_pnl or Decimal("0")
+        won = pnl > 0
+
+        if won:
+            wins += 1
+            win_pnls.append(float(pnl))
+        else:
+            losses += 1
+            loss_pnls.append(float(pnl))
+
+        total_realized_pnl += pnl
+
+        positions_list.append({
+            "id": position.id,
+            "market_title": market.title if market else "Unknown",
+            "direction": position.direction,
+            "realized_pnl": float(pnl),
+            "won": won,
+            "closed_date": position.exit_date.strftime("%Y-%m-%d") if position.exit_date else None,
+            "entry_price": float(position.entry_price) if position.entry_price else None,
+            "exit_price": float(position.exit_price) if position.exit_price else None,
+            "shares": float(position.shares) if position.shares else None,
+        })
+
+    total_closed = wins + losses
+    win_rate = round((wins / total_closed) * 100, 1) if total_closed > 0 else 0.0
+    avg_win = round(sum(win_pnls) / len(win_pnls), 2) if win_pnls else 0.0
+    avg_loss = round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else 0.0
+
+    return {
+        "total_closed": total_closed,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "total_realized_pnl": float(total_realized_pnl),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "positions": positions_list,
+    }
+
+
+@router.get("/{position_id}/detail")
+async def get_position_detail(
+    position_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get comprehensive detail for a single position including market metadata,
+    alerts, and 7-day price history."""
+    # Fetch position with market and cluster
+    result = await db.execute(
+        select(Position, Market, Cluster)
+        .outerjoin(Market, Position.market_id == Market.id)
+        .outerjoin(Cluster, Market.cluster_id == Cluster.id)
+        .where(Position.id == position_id)
+    )
+    row = result.first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Position not found")
+
+    position, market, cluster = row
+
+    # Calculate derived fields
+    cost_basis = float(position.cost_basis) if position.cost_basis else 0.0
+    current_value = float(position.current_value) if position.current_value else 0.0
+    unrealized_pnl = float(position.unrealized_pnl) if position.unrealized_pnl else 0.0
+    pnl_pct = round((unrealized_pnl / cost_basis) * 100, 2) if cost_basis > 0 else 0.0
+
+    days_remaining = None
+    if market and market.end_date:
+        delta = market.end_date - datetime.now(timezone.utc)
+        days_remaining = max(0, delta.days)
+
+    # Fetch alerts for this market
+    alerts_list = []
+    if market:
+        alert_result = await db.execute(
+            select(AlertDefinition).where(
+                AlertDefinition.market_slug == market.slug,
+                AlertDefinition.enabled == True,
+            )
+        )
+        alert_defs = alert_result.scalars().all()
+        for ad in alert_defs:
+            alerts_list.append({
+                "type": ad.alert_type,
+                "threshold": float(ad.threshold) if ad.threshold else None,
+                "action": ad.action,
+                "severity": ad.severity,
+            })
+
+    # Fetch 7-day price history (downsampled to 1 per day)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    date_expr = sa_func.date(PositionSnapshot.timestamp)
+    max_id_subq = (
+        select(sa_func.max(PositionSnapshot.id).label("max_id"))
+        .where(
+            PositionSnapshot.position_id == position_id,
+            PositionSnapshot.timestamp >= cutoff,
+        )
+        .group_by(date_expr)
+        .subquery()
+    )
+    snap_result = await db.execute(
+        select(PositionSnapshot.timestamp, PositionSnapshot.price)
+        .where(PositionSnapshot.id.in_(select(max_id_subq.c.max_id)))
+        .order_by(PositionSnapshot.timestamp)
+    )
+    price_history = [
+        {
+            "date": ts.strftime("%Y-%m-%d"),
+            "price": float(price) if price is not None else None,
+        }
+        for ts, price in snap_result.all()
+    ]
+
+    return {
+        "id": position.id,
+        "market_title": market.title if market else "Unknown",
+        "market_slug": market.slug if market else None,
+        "direction": position.direction,
+        "shares": float(position.shares) if position.shares else 0,
+        "entry_price": float(position.entry_price) if position.entry_price else 0,
+        "current_price": float(position.current_price) if position.current_price else 0,
+        "current_value": current_value,
+        "cost_basis": cost_basis,
+        "unrealized_pnl": unrealized_pnl,
+        "pnl_pct": pnl_pct,
+        "entry_date": position.entry_date.strftime("%Y-%m-%d") if position.entry_date else None,
+        "end_date": market.end_date.isoformat() if market and market.end_date else None,
+        "days_remaining": days_remaining,
+        "thesis_status": position.thesis_status,
+        "cluster_name": cluster.name if cluster else "uncorrelated",
+        "market_description": market.description if market else None,
+        "status": position.status,
+        "entry_reasoning": position.entry_reasoning,
+        "exit_reasoning": position.exit_reasoning,
+        "exit_price": float(position.exit_price) if position.exit_price else None,
+        "exit_date": position.exit_date.strftime("%Y-%m-%d") if position.exit_date else None,
+        "realized_pnl": float(position.realized_pnl) if position.realized_pnl else None,
+        "alerts": alerts_list,
+        "price_history_7d": price_history,
+    }
 
 
 @router.get("/{position_id}", response_model=PositionResponse)

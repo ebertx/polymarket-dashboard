@@ -31,6 +31,7 @@ async def get_current_portfolio(db: AsyncSession = Depends(get_db)):
                 current_value=p["current_value"],
                 unrealized_pnl=p["unrealized_pnl"],
                 status=p["status"],
+                end_date=p.get("end_date"),
             )
             for p in portfolio["positions"]
         ]

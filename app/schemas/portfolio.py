@@ -28,6 +28,7 @@ class PositionSummary(BaseModel):
     current_value: Optional[Decimal] = None
     unrealized_pnl: Optional[Decimal] = None
     status: Optional[str] = None
+    end_date: Optional[datetime] = None
 
     class Config:
         from_attributes = True

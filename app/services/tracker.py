@@ -547,6 +547,7 @@ class TrackerService:
                 "current_value": value,
                 "unrealized_pnl": unrealized,
                 "status": position.status,
+                "end_date": market.end_date if market else None,
             })
 
             total_position_value += value
