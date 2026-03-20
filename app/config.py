@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     ntfy_topic: str = ""  # e.g. "polymarket-alerts-xyz" — leave empty to disable notifications
     ntfy_server: str = "https://ntfy.sh"
     starting_capital: float = 229.13  # Jan 1, 2026 — used for portfolio drawdown calc
+    dashboard_url: str = "https://polymarket.ebertx.com"  # used for ntfy action buttons
 
     @property
     def database_url(self) -> str:

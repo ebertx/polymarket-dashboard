@@ -13,6 +13,27 @@ from app.services.alerts import AlertService
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
+@router.post("/acknowledge/{event_id}")
+async def acknowledge_alert(event_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Acknowledge an alert event from an ntfy action button.
+    Silences re-alerting for 24 hours for the same condition.
+    No authentication required (called from ntfy action buttons).
+    """
+    result = await db.execute(
+        select(AlertEvent).where(AlertEvent.id == event_id)
+    )
+    event = result.scalar_one_or_none()
+
+    if event is None:
+        return {"status": "not_found", "message": f"Alert event {event_id} not found"}
+
+    event.acknowledged_at = datetime.utcnow()
+    await db.commit()
+
+    return {"status": "ok", "message": f"Alert {event_id} acknowledged", "event_id": event_id}
+
+
 @router.get("/positions-needing-attention")
 async def get_positions_needing_attention(db: AsyncSession = Depends(get_db)):
     """

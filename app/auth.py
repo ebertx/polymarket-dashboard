@@ -119,6 +119,7 @@ class AuthMiddleware:
 
     EXCLUDED_PREFIXES = (
         "/static/",
+        "/alerts/acknowledge/",  # ntfy action buttons (no auth)
     )
 
     def __init__(self, app):

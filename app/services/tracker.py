@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import PortfolioSnapshot, Position, PositionSnapshot, Market
 from app.services.polymarket import PolymarketClient
+from app.services.alerts import AlertService
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class TrackerService:
     def __init__(self, db: AsyncSession, client: PolymarketClient):
         self.db = db
         self.client = client
+        self.alert_service = AlertService(db)
 
     async def take_portfolio_snapshot(self) -> Optional[PortfolioSnapshot]:
         """
@@ -169,6 +171,7 @@ class TrackerService:
 
         # Check for positions NOT found in API - these may have resolved
         now = datetime.now(timezone.utc)
+        newly_closed: list[tuple[str, str]] = []  # (market_slug, market_title)
         missing_positions = {
             token_id: (position, market)
             for token_id, (position, market) in db_positions.items()
@@ -239,6 +242,7 @@ class TrackerService:
                 logger.info(
                     f"Position {position.id} closed: realized_pnl=${realized_pnl:.2f}, exit_price={exit_price}"
                 )
+                newly_closed.append((market.slug, market.title))
             else:
                 # Position not in API and market hasn't resolved.
                 # Track consecutive misses and auto-close after threshold,
@@ -275,11 +279,29 @@ class TrackerService:
                         f"Position {position.id} auto-closed: "
                         f"realized_pnl=${realized_pnl:.2f}, exit_price={last_price}"
                     )
+                    newly_closed.append((market.slug, market.title))
                 else:
                     logger.warning(
                         f"Position {position.id} ('{market.title}') not found in API but market "
                         f"still active (miss {miss_count}/{AUTO_CLOSE_MISS_THRESHOLD}). "
                         f"Will auto-close after {AUTO_CLOSE_MISS_THRESHOLD} consecutive misses."
+                    )
+
+        # Clear alerts for any positions that were just closed
+        for market_slug, market_title in newly_closed:
+            if market_slug:
+                try:
+                    cleared = await self.alert_service.clear_alerts_for_closed_position(
+                        market_slug, market_title
+                    )
+                    if cleared:
+                        logger.info(
+                            f"Cleared {cleared} alert(s) for closed position '{market_title}'"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to clear alerts for closed position '{market_title}': {e}",
+                        exc_info=True,
                     )
 
     async def _auto_discover_positions(self, unknown_positions: List[Dict]) -> None:

@@ -51,6 +51,7 @@ class AlertEvent(Base):
     notification_error = Column(Text)  # error if notification failed
     triggered_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     cleared_at = Column(DateTime(timezone=True))  # when condition cleared
+    acknowledged_at = Column(DateTime(timezone=True))  # when user acknowledged via ntfy button
 
     definition = relationship("AlertDefinition", back_populates="events")
 

@@ -68,13 +68,22 @@ async def lifespan(app: FastAPI):
                     notified BOOLEAN DEFAULT FALSE,
                     notification_error TEXT,
                     triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    cleared_at TIMESTAMPTZ
+                    cleared_at TIMESTAMPTZ,
+                    acknowledged_at TIMESTAMPTZ
                 )
             """))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alert_events_definition ON alert_events(definition_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alert_events_cleared ON alert_events(cleared_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alert_events_triggered ON alert_events(triggered_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alert_definitions_enabled ON alert_definitions(enabled)"))
+            # Add acknowledged_at column if it doesn't exist (for existing deployments)
+            await conn.execute(text("""
+                DO $$ BEGIN
+                    ALTER TABLE alert_events ADD COLUMN acknowledged_at TIMESTAMPTZ;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$
+            """))
         logger.info("Alert tables ensured")
     except Exception as e:
         logger.warning(f"Could not ensure alert tables (non-fatal): {e}")

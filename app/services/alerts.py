@@ -80,6 +80,15 @@ class AlertService:
             if market.slug:
                 slug_map[market.slug] = (position, market)
 
+        # Safety net: find closed-position slugs so we can auto-disable stale alerts
+        result = await self.db.execute(
+            select(Market.slug)
+            .join(Position, Position.market_id == Market.id)
+            .where(Position.status == "closed")
+            .where(Market.slug.isnot(None))
+        )
+        closed_slugs: set[str] = {row[0] for row in result.all()}
+
         # Load portfolio summary
         portfolio = await self._get_portfolio_summary()
 
@@ -87,6 +96,17 @@ class AlertService:
         new_events: list[AlertEvent] = []
 
         for defn in definitions:
+            # Safety net: if this alert is for a closed position, auto-disable it
+            if not defn.is_global and defn.market_slug and defn.market_slug in closed_slugs:
+                if defn.market_slug not in slug_map:
+                    # Position is closed and no open position exists for this slug
+                    logger.info(
+                        f"Auto-disabling alert '{defn.slug}' — position for "
+                        f"'{defn.market_name or defn.market_slug}' is closed"
+                    )
+                    await self._disable_alerts_for_slug(defn.market_slug, now)
+                    continue
+
             triggered = self._check_definition(defn, slug_map, portfolio, position_rows, today)
             if not triggered:
                 continue
@@ -310,6 +330,7 @@ class AlertService:
         Returns True if:
         - No previous event for this definition, OR
         - Previous event was cleared (cleared_at is set) and re-triggered, OR
+        - Previous event was acknowledged and 24h have passed (re-alert if condition persists), OR
         - Cooldown period has elapsed since last notification
         """
         # Get last event for this definition
@@ -326,6 +347,15 @@ class AlertService:
 
         # If the last event was cleared, allow re-triggering
         if last_event.cleared_at is not None:
+            return True
+
+        # If the user acknowledged the alert, silence for 24 hours
+        if last_event.acknowledged_at is not None:
+            ack_time = last_event.acknowledged_at.replace(tzinfo=timezone.utc) if last_event.acknowledged_at.tzinfo is None else last_event.acknowledged_at
+            if now - ack_time < timedelta(hours=24):
+                logger.debug(f"Alert {defn.slug} silenced (acknowledged {last_event.acknowledged_at})")
+                return False
+            # 24h passed since acknowledgment and condition still holds — re-alert
             return True
 
         # Check cooldown
@@ -380,10 +410,18 @@ class AlertService:
                         "INFO": "information_source",
                     }
 
+                    # Build action buttons for ntfy
+                    dashboard_url = self.settings.dashboard_url.rstrip("/")
+                    actions = (
+                        f"http, Acknowledge, {dashboard_url}/alerts/acknowledge/{event.id}, method=POST, clear=true; "
+                        f"view, View Dashboard, {dashboard_url}"
+                    )
+
                     headers = {
                         "Title": title,
                         "Priority": priority,
                         "Tags": tags_map.get(event.severity, ""),
+                        "Actions": actions,
                     }
 
                     async with session.post(ntfy_url, data=body, headers=headers) as resp:
@@ -400,6 +438,113 @@ class AlertService:
                     logger.error(f"Notification error: {e}")
 
         await self.db.commit()
+
+    async def clear_alerts_for_closed_position(
+        self, market_slug: str, market_name: str
+    ) -> int:
+        """
+        Disable all alert definitions for a closed position and create a final
+        AlertEvent recording the automatic clearance.  Returns the number of
+        definitions disabled.
+
+        Called from TrackerService._sync_positions when a position transitions
+        to 'closed'.
+        """
+        now = datetime.now(timezone.utc)
+        count = await self._disable_alerts_for_slug(market_slug, now)
+
+        if count > 0:
+            # Send a single ntfy notification about the clearance
+            await self._send_position_closed_notification(market_name or market_slug)
+
+        return count
+
+    async def _disable_alerts_for_slug(
+        self, market_slug: str, now: datetime
+    ) -> int:
+        """
+        Disable all enabled AlertDefinitions for a given market_slug.
+        Creates a final AlertEvent for each, and clears any open events.
+        Returns the count of definitions disabled.
+        """
+        # Find enabled definitions for this slug
+        result = await self.db.execute(
+            select(AlertDefinition).where(
+                AlertDefinition.market_slug == market_slug,
+                AlertDefinition.enabled == True,  # noqa: E712
+            )
+        )
+        definitions = list(result.scalars().all())
+
+        if not definitions:
+            return 0
+
+        for defn in definitions:
+            defn.enabled = False
+
+            # Create a final informational event
+            event = AlertEvent(
+                definition_id=defn.id,
+                market_slug=defn.market_slug,
+                market_name=defn.market_name,
+                alert_type=defn.alert_type,
+                severity="INFO",
+                message="Position closed — alerts cleared automatically",
+                action="No action required",
+                triggered_at=now,
+                cleared_at=now,  # immediately cleared
+                notified=True,   # will send a consolidated notification separately
+            )
+            self.db.add(event)
+
+        # Also clear any open (uncleared) events for this slug
+        result = await self.db.execute(
+            select(AlertEvent).where(
+                AlertEvent.market_slug == market_slug,
+                AlertEvent.cleared_at.is_(None),
+            )
+        )
+        open_events = list(result.scalars().all())
+        for evt in open_events:
+            evt.cleared_at = now
+
+        await self.db.commit()
+
+        logger.info(
+            f"Cleared {len(definitions)} alert definition(s) for closed position "
+            f"'{market_slug}' (+ {len(open_events)} open event(s) cleared)"
+        )
+        return len(definitions)
+
+    async def _send_position_closed_notification(self, market_name: str) -> None:
+        """Send a single ntfy notification that a position's alerts were cleared."""
+        if not self.settings.ntfy_topic:
+            return
+
+        ntfy_url = f"{self.settings.ntfy_server}/{self.settings.ntfy_topic}"
+        title = "\u2705 Position closed"
+        body = f"{market_name} \u2014 alerts cleared automatically"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    ntfy_url,
+                    data=body,
+                    headers={
+                        "Title": title,
+                        "Priority": "default",
+                        "Tags": "white_check_mark",
+                    },
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info(f"Sent position-closed notification for '{market_name}'")
+                    else:
+                        resp_text = await resp.text()
+                        logger.warning(
+                            f"Position-closed notification failed: HTTP {resp.status}: {resp_text[:200]}"
+                        )
+        except Exception as e:
+            logger.error(f"Position-closed notification error: {e}")
 
     async def clear_stale_alerts(self) -> int:
         """
@@ -495,5 +640,6 @@ class AlertService:
             "notified": event.notified,
             "triggered_at": event.triggered_at.isoformat() if event.triggered_at else None,
             "cleared_at": event.cleared_at.isoformat() if event.cleared_at else None,
+            "acknowledged_at": event.acknowledged_at.isoformat() if event.acknowledged_at else None,
             "is_active": event.cleared_at is None,
         }
