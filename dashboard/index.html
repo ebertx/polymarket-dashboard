@@ -2,174 +2,200 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Polymarket Portfolio Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
     <style>
+        * { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+        body { -webkit-overflow-scrolling: touch; }
         .pnl-positive { color: #10b981; }
         .pnl-negative { color: #ef4444; }
         .loading { opacity: 0.5; }
-        .card { @apply bg-white rounded-lg shadow-md p-6; }
+        /* Prevent horizontal overflow */
+        html, body { overflow-x: hidden; max-width: 100vw; }
+        /* Range button active state */
+        .range-btn-active { background-color: #2563eb !important; color: white !important; }
     </style>
 </head>
-<body class="bg-gray-100 min-h-screen">
-    <div class="container mx-auto px-4 py-8">
-        <!-- Header -->
-        <header class="mb-8 flex justify-between items-start">
-            <div>
-                <h1 class="text-3xl font-bold text-gray-800">Polymarket Portfolio</h1>
-                <p class="text-gray-600" id="last-updated">Last updated: --</p>
-            </div>
-            <a href="/auth/logout" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg">
-                Logout
-            </a>
-        </header>
+<body class="bg-gray-900 min-h-screen text-gray-100">
+
+    <!-- Sticky Portfolio Summary Header -->
+    <div id="sticky-header" class="sticky top-0 z-50 bg-gray-900/95 backdrop-blur border-b border-gray-700 py-2 px-4">
+        <div class="flex justify-between items-center text-sm">
+            <span class="text-gray-100 font-bold" id="sticky-total">--</span>
+            <span class="font-bold" id="sticky-pnl">--</span>
+            <span class="text-gray-400" id="sticky-cash">Cash: --</span>
+        </div>
+    </div>
+
+    <!-- Last Updated + Refresh -->
+    <div class="flex items-center justify-between text-xs text-gray-500 px-4 py-1 border-b border-gray-800">
+        <span id="last-updated">Updated just now</span>
+        <div class="flex items-center gap-3">
+            <button onclick="loadAll()" class="text-blue-400 hover:text-blue-300 p-2 min-w-[44px] min-h-[44px] flex items-center justify-center">&#8635; Refresh</button>
+            <a href="/auth/logout" class="text-gray-500 hover:text-gray-300 p-2 min-w-[44px] min-h-[44px] flex items-center justify-center">Logout</a>
+        </div>
+    </div>
+
+    <div class="mx-auto px-3 md:px-4 py-3 md:py-8 max-w-7xl">
 
         <!-- Alert Banner -->
-        <div id="alert-banner" class="hidden mb-6 p-4 rounded-lg border-l-4">
-            <div class="flex items-center justify-between">
+        <div id="alert-banner" class="hidden mb-4 p-3 rounded-lg border-l-4">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div class="flex items-center">
-                    <span id="alert-icon" class="text-2xl mr-3"></span>
+                    <span id="alert-icon" class="text-xl mr-2"></span>
                     <div>
-                        <p id="alert-title" class="font-semibold"></p>
-                        <p id="alert-message" class="text-sm"></p>
+                        <p id="alert-title" class="font-semibold text-sm"></p>
+                        <p id="alert-message" class="text-xs"></p>
                     </div>
                 </div>
-                <button onclick="showAlertDetails()" class="px-3 py-1 text-sm bg-white rounded border hover:bg-gray-50">
+                <button onclick="showAlertDetails()" class="w-full sm:w-auto px-3 py-2 text-sm bg-gray-700 text-gray-100 rounded border border-gray-600 hover:bg-gray-600 min-h-[44px]">
                     View Details
                 </button>
             </div>
         </div>
 
         <!-- Alert Details Modal -->
-        <div id="alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden">
-                <div class="p-4 border-b flex justify-between items-center">
-                    <h3 class="text-lg font-semibold">Positions Needing Attention</h3>
-                    <button onclick="hideAlertDetails()" class="text-gray-500 hover:text-gray-700">&times;</button>
+        <div id="alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-end sm:items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-t-xl sm:rounded-lg shadow-xl w-full sm:max-w-2xl sm:mx-4 max-h-[85vh] overflow-hidden">
+                <div class="p-4 border-b border-gray-700 flex justify-between items-center">
+                    <h3 class="text-base font-semibold text-gray-100">Positions Needing Attention</h3>
+                    <button onclick="hideAlertDetails()" class="text-gray-400 hover:text-gray-200 p-2 min-w-[44px] min-h-[44px] flex items-center justify-center text-xl">&times;</button>
                 </div>
-                <div id="alert-details" class="p-4 overflow-y-auto max-h-[60vh]">
+                <div id="alert-details" class="p-4 overflow-y-auto max-h-[70vh]">
                     <p class="text-gray-500">Loading...</p>
                 </div>
             </div>
         </div>
 
-        <!-- Portfolio Summary -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <p class="text-sm text-gray-500 uppercase tracking-wide">Total Value</p>
-                <p class="text-2xl font-bold text-gray-800" id="total-value">--</p>
+        <!-- Portfolio Summary: 2x2 on mobile, 4-col on desktop -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mb-4 md:mb-8">
+            <div class="bg-gray-800 rounded-lg p-2 md:p-4">
+                <p class="text-xs text-gray-400 uppercase tracking-wide">Total Value</p>
+                <p class="text-lg md:text-2xl font-bold text-gray-100" id="total-value">--</p>
             </div>
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <p class="text-sm text-gray-500 uppercase tracking-wide">Position Value</p>
-                <p class="text-2xl font-bold text-gray-800" id="position-value">--</p>
+            <div class="bg-gray-800 rounded-lg p-2 md:p-4">
+                <p class="text-xs text-gray-400 uppercase tracking-wide">Position Value</p>
+                <p class="text-lg md:text-2xl font-bold text-gray-100" id="position-value">--</p>
             </div>
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <p class="text-sm text-gray-500 uppercase tracking-wide">Cash (USDC)</p>
-                <p class="text-2xl font-bold text-gray-800" id="cash-balance">--</p>
+            <div class="bg-gray-800 rounded-lg p-2 md:p-4">
+                <p class="text-xs text-gray-400 uppercase tracking-wide">Cash (USDC)</p>
+                <p class="text-lg md:text-2xl font-bold text-gray-100" id="cash-balance">--</p>
             </div>
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <p class="text-sm text-gray-500 uppercase tracking-wide">Unrealized P&L</p>
-                <p class="text-2xl font-bold" id="unrealized-pnl">--</p>
+            <div id="pnl-card" class="bg-gray-800 rounded-lg p-2 md:p-4">
+                <p class="text-xs text-gray-400 uppercase tracking-wide">Unrealized P&L</p>
+                <p class="text-lg md:text-2xl font-bold" id="unrealized-pnl">--</p>
             </div>
         </div>
 
         <!-- Charts Row -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-4 md:mb-8">
             <!-- Portfolio History Chart -->
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h2 class="text-lg font-semibold text-gray-800 mb-4">Portfolio Value History</h2>
-                <div style="height: 300px;">
+            <div class="bg-gray-800 rounded-lg p-3 md:p-6">
+                <h2 class="text-sm md:text-lg font-semibold text-gray-100 mb-2 md:mb-4">Portfolio Value History</h2>
+                <!-- Time Range Buttons -->
+                <div class="flex space-x-2 mb-2">
+                    <button onclick="setRange('1d')" id="range-1d" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600 min-h-[32px]">1D</button>
+                    <button onclick="setRange('7d')" id="range-7d" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600 min-h-[32px] range-btn-active">7D</button>
+                    <button onclick="setRange('30d')" id="range-30d" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600 min-h-[32px]">30D</button>
+                    <button onclick="setRange('all')" id="range-all" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600 min-h-[32px]">All</button>
+                </div>
+                <div style="height: 250px;" class="md:h-[300px]">
                     <canvas id="history-chart"></canvas>
                 </div>
             </div>
 
             <!-- Cluster Exposure Chart -->
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h2 class="text-lg font-semibold text-gray-800 mb-4">Cluster Exposure</h2>
-                <div style="height: 300px;">
+            <div class="bg-gray-800 rounded-lg p-3 md:p-6">
+                <h2 class="text-sm md:text-lg font-semibold text-gray-100 mb-2 md:mb-4">Cluster Exposure</h2>
+                <!-- Mobile: horizontal bars, Desktop: doughnut chart -->
+                <div class="block md:hidden" id="cluster-bars-mobile">
+                    <div class="space-y-2" id="cluster-bars-container">
+                        <p class="text-gray-500 text-sm">Loading...</p>
+                    </div>
+                </div>
+                <div class="hidden md:block" style="height: 300px;">
                     <canvas id="exposure-chart"></canvas>
                 </div>
             </div>
         </div>
 
-        <!-- Positions Table -->
-        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-            <h2 class="text-lg font-semibold text-gray-800 mb-4">Open Positions</h2>
-            <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Market</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
-                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Shares</th>
-                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Entry</th>
-                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Current</th>
-                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">P&L</th>
-                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">P&L %</th>
-                        </tr>
-                    </thead>
-                    <tbody id="positions-table" class="bg-white divide-y divide-gray-200">
-                        <tr>
-                            <td colspan="8" class="px-4 py-8 text-center text-gray-500">Loading...</td>
-                        </tr>
-                    </tbody>
-                </table>
+        <!-- Open Positions (Cards on mobile, still cards on desktop for consistency) -->
+        <div class="bg-gray-800 rounded-lg p-3 md:p-6 mb-4 md:mb-8">
+            <h2 class="text-sm md:text-lg font-semibold text-gray-100 mb-3">Open Positions</h2>
+            <div id="positions-container">
+                <p class="text-gray-500 text-sm">Loading...</p>
+            </div>
+
+            <!-- Closed Positions (collapsible) -->
+            <div class="mt-4 pt-3 border-t border-gray-700">
+                <button onclick="toggleClosed()" id="closed-toggle-btn" class="text-sm text-gray-400 flex items-center min-h-[44px] hover:text-gray-200 w-full">
+                    <span id="closed-toggle-icon" class="mr-2 text-xs">&#9654;</span>
+                    <span id="closed-toggle-text">Closed Positions (tap to show)</span>
+                </button>
+                <div id="closed-summary" class="hidden text-xs text-gray-500 mt-1 mb-2"></div>
+                <div id="closed-positions" class="hidden mt-2 space-y-2">
+                    <p class="text-gray-500 text-sm">Loading...</p>
+                </div>
             </div>
         </div>
 
-        <!-- Rule-Based Alerts -->
-        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-semibold text-gray-800">Active Alerts</h2>
+        <!-- Active Alerts -->
+        <div class="bg-gray-800 rounded-lg p-3 md:p-6 mb-4 md:mb-8">
+            <div class="flex justify-between items-center mb-3">
+                <h2 class="text-sm md:text-lg font-semibold text-gray-100">Active Alerts</h2>
                 <div class="flex items-center gap-3">
-                    <span id="alert-system-status" class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-600">checking...</span>
-                    <button onclick="toggleAlertHistory()" class="text-sm text-blue-600 hover:underline">Show History</button>
+                    <span id="alert-system-status" class="text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400">checking...</span>
+                    <button onclick="toggleAlertHistory()" class="text-sm text-blue-400 hover:text-blue-300 min-h-[44px] min-w-[44px] px-2 flex items-center">History</button>
                 </div>
             </div>
             <div id="active-alerts-list" class="space-y-3">
-                <p class="text-gray-500">Loading...</p>
+                <p class="text-gray-500 text-sm">Loading...</p>
             </div>
             <!-- Alert History (hidden by default) -->
-            <div id="alert-history-section" class="hidden mt-6 pt-4 border-t">
-                <h3 class="text-md font-semibold text-gray-700 mb-3">Recent Alert History</h3>
+            <div id="alert-history-section" class="hidden mt-4 pt-3 border-t border-gray-700">
+                <h3 class="text-sm font-semibold text-gray-300 mb-3">Recent Alert History</h3>
                 <div id="alert-history-list" class="space-y-2 max-h-96 overflow-y-auto">
-                    <p class="text-gray-500">Loading...</p>
+                    <p class="text-gray-500 text-sm">Loading...</p>
                 </div>
             </div>
         </div>
 
-        <!-- Cluster Exposure Details -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h2 class="text-lg font-semibold text-gray-800 mb-4">Exposure by Cluster</h2>
-                <div id="cluster-list" class="space-y-3">
-                    <p class="text-gray-500">Loading...</p>
+        <!-- Cluster Exposure Details + Catalysts -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-4 md:mb-8">
+            <div class="bg-gray-800 rounded-lg p-3 md:p-6">
+                <h2 class="text-sm md:text-lg font-semibold text-gray-100 mb-3">Exposure by Cluster</h2>
+                <div id="cluster-list" class="space-y-2">
+                    <p class="text-gray-500 text-sm">Loading...</p>
                 </div>
             </div>
 
             <!-- Upcoming Catalysts -->
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h2 class="text-lg font-semibold text-gray-800 mb-4">Upcoming Catalysts (7 days)</h2>
-                <div id="catalysts-list" class="space-y-3">
-                    <p class="text-gray-500">Loading...</p>
+            <div class="bg-gray-800 rounded-lg p-3 md:p-6">
+                <h2 class="text-sm md:text-lg font-semibold text-gray-100 mb-3">Upcoming Catalysts (7 days)</h2>
+                <div id="catalysts-list" class="space-y-2">
+                    <p class="text-gray-500 text-sm">Loading...</p>
                 </div>
             </div>
         </div>
 
         <!-- Footer -->
-        <footer class="text-center text-gray-500 text-sm">
-            <p>Auto-refreshes every 60 seconds | <a href="/docs" class="text-blue-500 hover:underline">API Docs</a></p>
+        <footer class="text-center text-gray-500 text-xs pb-4">
+            <p>Auto-refreshes every 60 seconds | <a href="/docs" class="text-blue-400 hover:underline">API Docs</a></p>
         </footer>
     </div>
 
     <script>
         const API_BASE = window.location.origin;
+        const STARTING_CAPITAL = 229.13;
         let historyChart = null;
         let exposureChart = null;
+        let allSnapshots = [];
+        let currentRange = '7d';
+        let lastRefreshTime = Date.now();
+        let closedPositionsLoaded = false;
 
         // Format currency
         function formatCurrency(value) {
@@ -185,7 +211,7 @@
         function formatPercent(value) {
             if (value === null || value === undefined) return '--';
             const sign = value >= 0 ? '+' : '';
-            return sign + (value * 100).toFixed(2) + '%';
+            return sign + (value * 100).toFixed(1) + '%';
         }
 
         // Get P&L class
@@ -200,59 +226,113 @@
             return (value * 100).toFixed(1) + '\u00A2';
         }
 
+        // Get border color class based on P&L percentage
+        function getBorderColor(pnlPct) {
+            if (pnlPct > 0.20) return 'border-green-400';
+            if (pnlPct > 0) return 'border-green-600';
+            if (pnlPct > -0.20) return 'border-red-600';
+            return 'border-red-400';
+        }
+
+        // Get P&L text color
+        function getPnlTextColor(value) {
+            if (value === null || value === undefined) return 'text-gray-400';
+            return value >= 0 ? 'text-green-400' : 'text-red-400';
+        }
+
+        // Days remaining helper
+        function getDaysInfo(endDate) {
+            if (!endDate) return { text: '', colorClass: 'text-gray-500' };
+            const now = new Date();
+            const end = new Date(endDate);
+            const daysLeft = Math.ceil((end - now) / (1000 * 60 * 60 * 24));
+            if (daysLeft <= 0) return { text: 'Expired', colorClass: 'text-red-400' };
+            if (daysLeft <= 7) return { text: daysLeft + 'd', colorClass: 'text-red-400' };
+            if (daysLeft <= 14) return { text: daysLeft + 'd', colorClass: 'text-yellow-400' };
+            return { text: daysLeft + 'd', colorClass: 'text-gray-500' };
+        }
+
         // Fetch current portfolio
         async function fetchPortfolio() {
             try {
                 const response = await fetch(`${API_BASE}/portfolio/current`);
                 const data = await response.json();
 
+                // Summary cards
                 document.getElementById('total-value').textContent = formatCurrency(data.total_value);
                 document.getElementById('position-value').textContent = formatCurrency(data.position_value);
                 document.getElementById('cash-balance').textContent = formatCurrency(data.cash_balance);
 
                 const pnlEl = document.getElementById('unrealized-pnl');
                 pnlEl.textContent = formatCurrency(data.unrealized_pnl);
-                pnlEl.className = `text-2xl font-bold ${getPnlClass(data.unrealized_pnl)}`;
+                pnlEl.className = `text-lg md:text-2xl font-bold ${getPnlTextColor(data.unrealized_pnl)}`;
 
-                if (data.last_updated) {
-                    document.getElementById('last-updated').textContent =
-                        `Last updated: ${new Date(data.last_updated).toLocaleString()}`;
+                // P&L card background tint
+                const pnlCard = document.getElementById('pnl-card');
+                if (data.unrealized_pnl >= 0) {
+                    pnlCard.className = 'bg-green-900/30 border border-green-800/50 rounded-lg p-2 md:p-4';
+                } else {
+                    pnlCard.className = 'bg-red-900/30 border border-red-800/50 rounded-lg p-2 md:p-4';
                 }
 
-                updatePositionsTable(data.positions);
+                // Sticky header
+                document.getElementById('sticky-total').textContent = formatCurrency(data.total_value);
+                const stickyPnl = document.getElementById('sticky-pnl');
+                const totalPnl = parseFloat(data.unrealized_pnl) || 0;
+                const totalPnlPct = STARTING_CAPITAL > 0 ? (totalPnl / STARTING_CAPITAL) : 0;
+                stickyPnl.textContent = `${totalPnl >= 0 ? '+' : ''}${formatCurrency(totalPnl)} (${(totalPnlPct * 100).toFixed(1)}%)`;
+                stickyPnl.className = `font-bold ${getPnlTextColor(totalPnl)}`;
+                document.getElementById('sticky-cash').textContent = `Cash: ${formatCurrency(data.cash_balance)}`;
+
+                // Update timestamp
+                lastRefreshTime = Date.now();
+
+                updatePositionCards(data.positions);
             } catch (error) {
                 console.error('Failed to fetch portfolio:', error);
             }
         }
 
-        // Update positions table
-        function updatePositionsTable(positions) {
-            const tbody = document.getElementById('positions-table');
+        // Update positions as cards (M1)
+        function updatePositionCards(positions) {
+            const container = document.getElementById('positions-container');
 
             if (!positions || positions.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">No open positions</td></tr>';
+                container.innerHTML = '<p class="text-gray-500 text-sm py-4 text-center">No open positions</p>';
                 return;
             }
 
-            tbody.innerHTML = positions.map(pos => {
-                const costBasis = pos.shares * pos.entry_price;
-                const pnlPct = costBasis > 0 ? (pos.unrealized_pnl / costBasis) : 0;
+            // Sort by absolute current value (biggest first)
+            const sorted = [...positions].sort((a, b) => {
+                return Math.abs(parseFloat(b.current_value) || 0) - Math.abs(parseFloat(a.current_value) || 0);
+            });
+
+            container.innerHTML = sorted.map(pos => {
+                const costBasis = parseFloat(pos.shares) * parseFloat(pos.entry_price);
+                const pnlPct = costBasis > 0 ? (parseFloat(pos.unrealized_pnl) / costBasis) : 0;
+                const pnl = parseFloat(pos.unrealized_pnl) || 0;
+                const borderColor = getBorderColor(pnlPct);
+                const pnlColor = getPnlTextColor(pnl);
+                const days = getDaysInfo(pos.end_date);
+                const daysHtml = days.text ? ` <span class="${days.colorClass}">${days.text}${days.colorClass === 'text-red-400' && days.text !== 'Expired' ? ' &#9888;' : ''}</span>` : '';
+                const shares = parseFloat(pos.shares).toFixed(1);
 
                 return `
-                    <tr class="hover:bg-gray-50">
-                        <td class="px-4 py-3 text-sm font-medium text-gray-900">${pos.market_title || 'Unknown'}</td>
-                        <td class="px-4 py-3 text-sm">
-                            <span class="px-2 py-1 rounded text-xs font-medium ${pos.direction === 'yes' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
-                                ${pos.direction.toUpperCase()}
-                            </span>
-                        </td>
-                        <td class="px-4 py-3 text-sm text-right text-gray-700">${parseFloat(pos.shares).toFixed(1)}</td>
-                        <td class="px-4 py-3 text-sm text-right text-gray-700">${formatPrice(pos.entry_price)}</td>
-                        <td class="px-4 py-3 text-sm text-right text-gray-700">${formatPrice(pos.current_price)}</td>
-                        <td class="px-4 py-3 text-sm text-right text-gray-700">${formatCurrency(pos.current_value)}</td>
-                        <td class="px-4 py-3 text-sm text-right font-medium ${getPnlClass(pos.unrealized_pnl)}">${formatCurrency(pos.unrealized_pnl)}</td>
-                        <td class="px-4 py-3 text-sm text-right font-medium ${getPnlClass(pnlPct)}">${formatPercent(pnlPct)}</td>
-                    </tr>
+                    <div class="rounded-lg border-l-4 ${borderColor} bg-gray-750 p-3 mb-2" style="background: rgba(31,41,55,0.8);">
+                        <div class="flex justify-between items-center">
+                            <div class="flex-1 min-w-0 mr-3">
+                                <div class="text-sm font-medium text-gray-100 truncate">${pos.market_title || 'Unknown'}</div>
+                                <div class="text-xs text-gray-400">
+                                    <span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium mr-1 ${pos.direction === 'yes' ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}">${pos.direction.toUpperCase()}</span>
+                                    ${shares} shares${daysHtml}
+                                </div>
+                            </div>
+                            <div class="text-right flex-shrink-0">
+                                <div class="text-sm font-bold ${pnlColor}">${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}</div>
+                                <div class="text-xs ${pnlColor}">${formatPercent(pnlPct)}</div>
+                            </div>
+                        </div>
+                    </div>
                 `;
             }).join('');
         }
@@ -260,45 +340,92 @@
         // Fetch portfolio history
         async function fetchHistory() {
             try {
-                const response = await fetch(`${API_BASE}/portfolio/history?limit=200`);
+                const response = await fetch(`${API_BASE}/portfolio/history?limit=1000`);
                 const data = await response.json();
 
                 if (data.snapshots && data.snapshots.length > 0) {
-                    updateHistoryChart(data.snapshots);
+                    allSnapshots = data.snapshots.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                    updateHistoryChart();
                 }
             } catch (error) {
                 console.error('Failed to fetch history:', error);
             }
         }
 
-        // Update history chart
-        function updateHistoryChart(snapshots) {
-            const ctx = document.getElementById('history-chart').getContext('2d');
+        // Set chart time range
+        function setRange(range) {
+            currentRange = range;
+            // Update active button styling
+            ['1d', '7d', '30d', 'all'].forEach(r => {
+                const btn = document.getElementById('range-' + r);
+                if (r === range) {
+                    btn.classList.add('range-btn-active');
+                } else {
+                    btn.classList.remove('range-btn-active');
+                }
+            });
+            updateHistoryChart();
+        }
 
-            const chartData = snapshots
-                .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-                .map(s => ({
-                    x: new Date(s.timestamp),
-                    y: parseFloat(s.total_value)
-                }));
+        // Filter snapshots by range
+        function getFilteredSnapshots() {
+            if (currentRange === 'all' || !allSnapshots.length) return allSnapshots;
+            const now = new Date();
+            let cutoff;
+            switch (currentRange) {
+                case '1d': cutoff = new Date(now - 24 * 60 * 60 * 1000); break;
+                case '7d': cutoff = new Date(now - 7 * 24 * 60 * 60 * 1000); break;
+                case '30d': cutoff = new Date(now - 30 * 24 * 60 * 60 * 1000); break;
+                default: return allSnapshots;
+            }
+            return allSnapshots.filter(s => new Date(s.timestamp) >= cutoff);
+        }
+
+        // Update history chart
+        function updateHistoryChart() {
+            const ctx = document.getElementById('history-chart').getContext('2d');
+            const filtered = getFilteredSnapshots();
+
+            const chartData = filtered.map(s => ({
+                x: new Date(s.timestamp),
+                y: parseFloat(s.total_value)
+            }));
+
+            // Starting capital reference line
+            const refLineData = chartData.length > 0 ? [
+                { x: chartData[0].x, y: STARTING_CAPITAL },
+                { x: chartData[chartData.length - 1].x, y: STARTING_CAPITAL }
+            ] : [];
 
             if (historyChart) {
                 historyChart.data.datasets[0].data = chartData;
-                historyChart.update();
+                historyChart.data.datasets[1].data = refLineData;
+                historyChart.update('none');
             } else {
                 historyChart = new Chart(ctx, {
                     type: 'line',
                     data: {
-                        datasets: [{
-                            label: 'Portfolio Value',
-                            data: chartData,
-                            borderColor: '#3b82f6',
-                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                            fill: true,
-                            tension: 0.3,
-                            pointRadius: 0,
-                            pointHitRadius: 10,
-                        }]
+                        datasets: [
+                            {
+                                label: 'Portfolio Value',
+                                data: chartData,
+                                borderColor: '#3b82f6',
+                                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                                fill: true,
+                                tension: 0.3,
+                                pointRadius: 0,
+                                pointHitRadius: 10,
+                            },
+                            {
+                                label: 'Starting Capital',
+                                data: refLineData,
+                                borderColor: 'rgba(156, 163, 175, 0.5)',
+                                borderDash: [5, 5],
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                fill: false,
+                            }
+                        ]
                     },
                     options: {
                         responsive: true,
@@ -309,12 +436,15 @@
                         scales: {
                             x: {
                                 type: 'time',
-                                time: { unit: 'day' },
-                                grid: { display: false }
+                                time: { unit: currentRange === '1d' ? 'hour' : 'day' },
+                                grid: { color: 'rgba(55, 65, 81, 0.5)' },
+                                ticks: { color: '#9ca3af', maxTicksLimit: 6 }
                             },
                             y: {
                                 beginAtZero: false,
+                                grid: { color: 'rgba(55, 65, 81, 0.5)' },
                                 ticks: {
+                                    color: '#9ca3af',
                                     callback: value => '$' + value.toFixed(0)
                                 }
                             }
@@ -331,13 +461,14 @@
                 const data = await response.json();
 
                 updateExposureChart(data);
+                updateClusterBars(data);
                 updateClusterList(data);
             } catch (error) {
                 console.error('Failed to fetch exposure:', error);
             }
         }
 
-        // Update exposure doughnut chart
+        // Update exposure doughnut chart (desktop only)
         function updateExposureChart(data) {
             const ctx = document.getElementById('exposure-chart').getContext('2d');
 
@@ -348,7 +479,7 @@
                 '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'
             ];
 
-            data.clusters.forEach((cluster, i) => {
+            data.clusters.forEach((cluster) => {
                 labels.push(cluster.cluster_name);
                 values.push(cluster.total_value);
             });
@@ -379,7 +510,10 @@
                         plugins: {
                             legend: {
                                 position: 'right',
-                                labels: { boxWidth: 12 }
+                                labels: {
+                                    boxWidth: 12,
+                                    color: '#9ca3af'
+                                }
                             }
                         }
                     }
@@ -387,7 +521,47 @@
             }
         }
 
-        // Update cluster list
+        // Update cluster horizontal bars (mobile) - N7
+        function updateClusterBars(data) {
+            const container = document.getElementById('cluster-bars-container');
+            const totalValue = data.clusters.reduce((sum, c) => sum + c.total_value, 0) + data.unclustered.total_value;
+
+            let html = '';
+            const allClusters = [...data.clusters];
+            if (data.unclustered.total_value > 0) {
+                allClusters.push({
+                    cluster_name: 'Unclustered',
+                    total_value: data.unclustered.total_value,
+                    max_exposure_pct: null,
+                    position_count: data.unclustered.position_count
+                });
+            }
+
+            allClusters.forEach(cluster => {
+                const pct = totalValue > 0 ? (cluster.total_value / totalValue * 100) : 0;
+                const maxPct = cluster.max_exposure_pct || 20;
+                const barWidthPct = Math.min((pct / maxPct) * 100, 100);
+                let barColor = 'bg-blue-500';
+                if (barWidthPct > 90) barColor = 'bg-red-500';
+                else if (barWidthPct > 75) barColor = 'bg-yellow-500';
+
+                html += `
+                    <div>
+                        <div class="flex justify-between text-xs text-gray-400 mb-1">
+                            <span>${cluster.cluster_name}</span>
+                            <span>${formatCurrency(cluster.total_value)} (${pct.toFixed(1)}% / ${maxPct}%)</span>
+                        </div>
+                        <div class="h-2 bg-gray-700 rounded-full">
+                            <div class="h-2 ${barColor} rounded-full transition-all" style="width: ${barWidthPct}%"></div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html || '<p class="text-gray-500 text-sm">No cluster data</p>';
+        }
+
+        // Update cluster list (detail section)
         function updateClusterList(data) {
             const container = document.getElementById('cluster-list');
             const totalValue = data.clusters.reduce((sum, c) => sum + c.total_value, 0) + data.unclustered.total_value;
@@ -400,14 +574,14 @@
                 const isOverLimit = pct > maxPct;
 
                 html += `
-                    <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div class="flex items-center justify-between p-2 md:p-3 bg-gray-700/50 rounded-lg">
                         <div>
-                            <p class="font-medium text-gray-800">${cluster.cluster_name}</p>
-                            <p class="text-sm text-gray-500">${cluster.position_count} positions</p>
+                            <p class="font-medium text-gray-100 text-sm">${cluster.cluster_name}</p>
+                            <p class="text-xs text-gray-500">${cluster.position_count} positions</p>
                         </div>
                         <div class="text-right">
-                            <p class="font-medium ${isOverLimit ? 'text-red-600' : 'text-gray-800'}">${formatCurrency(cluster.total_value)}</p>
-                            <p class="text-sm ${isOverLimit ? 'text-red-500' : 'text-gray-500'}">${pct.toFixed(1)}% / ${maxPct}%</p>
+                            <p class="font-medium text-sm ${isOverLimit ? 'text-red-400' : 'text-gray-100'}">${formatCurrency(cluster.total_value)}</p>
+                            <p class="text-xs ${isOverLimit ? 'text-red-400' : 'text-gray-500'}">${pct.toFixed(1)}% / ${maxPct}%</p>
                         </div>
                     </div>
                 `;
@@ -416,20 +590,20 @@
             if (data.unclustered.total_value > 0) {
                 const pct = totalValue > 0 ? (data.unclustered.total_value / totalValue * 100) : 0;
                 html += `
-                    <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div class="flex items-center justify-between p-2 md:p-3 bg-gray-700/50 rounded-lg">
                         <div>
-                            <p class="font-medium text-gray-800">Unclustered</p>
-                            <p class="text-sm text-gray-500">${data.unclustered.position_count} positions</p>
+                            <p class="font-medium text-gray-100 text-sm">Unclustered</p>
+                            <p class="text-xs text-gray-500">${data.unclustered.position_count} positions</p>
                         </div>
                         <div class="text-right">
-                            <p class="font-medium text-gray-800">${formatCurrency(data.unclustered.total_value)}</p>
-                            <p class="text-sm text-gray-500">${pct.toFixed(1)}%</p>
+                            <p class="font-medium text-sm text-gray-100">${formatCurrency(data.unclustered.total_value)}</p>
+                            <p class="text-xs text-gray-500">${pct.toFixed(1)}%</p>
                         </div>
                     </div>
                 `;
             }
 
-            container.innerHTML = html || '<p class="text-gray-500">No cluster data</p>';
+            container.innerHTML = html || '<p class="text-gray-500 text-sm">No cluster data</p>';
         }
 
         // Fetch upcoming catalysts
@@ -437,42 +611,41 @@
             try {
                 const response = await fetch(`${API_BASE}/catalysts/upcoming?days=7`);
                 const data = await response.json();
-
                 updateCatalystsList(data.catalysts);
             } catch (error) {
                 console.error('Failed to fetch catalysts:', error);
             }
         }
 
-        // Update catalysts list
+        // Update catalysts list (dark theme)
         function updateCatalystsList(catalysts) {
             const container = document.getElementById('catalysts-list');
 
             if (!catalysts || catalysts.length === 0) {
-                container.innerHTML = '<p class="text-gray-500">No upcoming catalysts</p>';
+                container.innerHTML = '<p class="text-gray-500 text-sm">No upcoming catalysts</p>';
                 return;
             }
 
             container.innerHTML = catalysts.map(cat => {
-                const urgencyClass = cat.days_until <= 1 ? 'border-red-400 bg-red-50' :
-                                    cat.days_until <= 3 ? 'border-yellow-400 bg-yellow-50' :
-                                    'border-gray-200 bg-gray-50';
+                const urgencyClass = cat.days_until <= 1 ? 'border-red-500 bg-red-900/20' :
+                                    cat.days_until <= 3 ? 'border-yellow-500 bg-yellow-900/20' :
+                                    'border-gray-600 bg-gray-700/30';
 
                 return `
-                    <div class="p-3 rounded-lg border-l-4 ${urgencyClass}">
+                    <div class="p-2 md:p-3 rounded-lg border-l-4 ${urgencyClass}">
                         <div class="flex justify-between items-start">
-                            <div>
-                                <p class="font-medium text-gray-800">${cat.title}</p>
-                                <p class="text-sm text-gray-500">${cat.affected_cluster || 'No cluster'}</p>
+                            <div class="flex-1 min-w-0 mr-2">
+                                <p class="font-medium text-gray-100 text-sm truncate">${cat.title}</p>
+                                <p class="text-xs text-gray-500">${cat.affected_cluster || 'No cluster'}</p>
                             </div>
-                            <div class="text-right">
-                                <p class="text-sm font-medium ${cat.days_until <= 1 ? 'text-red-600' : 'text-gray-700'}">
+                            <div class="text-right flex-shrink-0">
+                                <p class="text-xs font-medium ${cat.days_until <= 1 ? 'text-red-400' : 'text-gray-300'}">
                                     ${cat.days_until === 0 ? 'Today' : cat.days_until === 1 ? 'Tomorrow' : `${cat.days_until} days`}
                                 </p>
                                 ${cat.affected_position_value > 0 ? `<p class="text-xs text-gray-500">${formatCurrency(cat.affected_position_value)} at risk</p>` : ''}
                             </div>
                         </div>
-                        ${cat.recommended_action ? `<p class="text-sm text-blue-600 mt-1">Action: ${cat.recommended_action}</p>` : ''}
+                        ${cat.recommended_action ? `<p class="text-xs text-blue-400 mt-1">Action: ${cat.recommended_action}</p>` : ''}
                     </div>
                 `;
             }).join('');
@@ -489,7 +662,7 @@
             }
         }
 
-        // Update alert banner
+        // Update alert banner (dark theme)
         function updateAlertBanner(data) {
             const banner = document.getElementById('alert-banner');
             const icon = document.getElementById('alert-icon');
@@ -504,33 +677,32 @@
             banner.classList.remove('hidden');
 
             if (data.has_critical) {
-                banner.className = 'mb-6 p-4 rounded-lg border-l-4 bg-red-50 border-red-500';
+                banner.className = 'mb-4 p-3 rounded-lg border-l-4 bg-red-900/30 border-red-500';
                 icon.textContent = '\u26a0\ufe0f';
                 title.textContent = 'Critical: Immediate action required';
-                title.className = 'font-semibold text-red-800';
+                title.className = 'font-semibold text-sm text-red-300';
                 message.textContent = `${data.count} position(s) need attention`;
-                message.className = 'text-sm text-red-600';
+                message.className = 'text-xs text-red-400';
             } else if (data.has_high) {
-                banner.className = 'mb-6 p-4 rounded-lg border-l-4 bg-orange-50 border-orange-500';
+                banner.className = 'mb-4 p-3 rounded-lg border-l-4 bg-orange-900/30 border-orange-500';
                 icon.textContent = '\u26a0\ufe0f';
                 title.textContent = 'Warning: Review recommended';
-                title.className = 'font-semibold text-orange-800';
+                title.className = 'font-semibold text-sm text-orange-300';
                 message.textContent = `${data.count} position(s) need attention`;
-                message.className = 'text-sm text-orange-600';
+                message.className = 'text-xs text-orange-400';
             } else {
-                banner.className = 'mb-6 p-4 rounded-lg border-l-4 bg-yellow-50 border-yellow-500';
+                banner.className = 'mb-4 p-3 rounded-lg border-l-4 bg-yellow-900/30 border-yellow-500';
                 icon.textContent = '\u2139\ufe0f';
                 title.textContent = 'Notice: Positions to monitor';
-                title.className = 'font-semibold text-yellow-800';
+                title.className = 'font-semibold text-sm text-yellow-300';
                 message.textContent = `${data.count} position(s) flagged for review`;
-                message.className = 'text-sm text-yellow-600';
+                message.className = 'text-xs text-yellow-400';
             }
 
-            // Store alerts data for modal
             window.alertsData = data;
         }
 
-        // Show alert details modal
+        // Show alert details modal (dark theme)
         function showAlertDetails() {
             const modal = document.getElementById('alert-modal');
             const details = document.getElementById('alert-details');
@@ -540,27 +712,27 @@
             } else {
                 details.innerHTML = window.alertsData.alerts.map(alert => {
                     const severityColors = {
-                        critical: 'bg-red-100 border-red-300 text-red-800',
-                        high: 'bg-orange-100 border-orange-300 text-orange-800',
-                        medium: 'bg-yellow-100 border-yellow-300 text-yellow-800',
-                        low: 'bg-gray-100 border-gray-300 text-gray-800',
+                        critical: 'bg-red-900/40 border-red-700 text-red-200',
+                        high: 'bg-orange-900/40 border-orange-700 text-orange-200',
+                        medium: 'bg-yellow-900/40 border-yellow-700 text-yellow-200',
+                        low: 'bg-gray-700/40 border-gray-600 text-gray-200',
                     };
                     const colorClass = severityColors[alert.severity] || severityColors.low;
 
                     return `
-                        <div class="mb-4 p-4 border rounded-lg ${colorClass}">
+                        <div class="mb-3 p-3 border rounded-lg ${colorClass}">
                             <div class="flex justify-between items-start mb-2">
                                 <div>
-                                    <p class="font-semibold">${alert.market_title}</p>
-                                    <p class="text-sm">${alert.direction.toUpperCase()} | ${alert.cluster || 'Unclustered'}</p>
+                                    <p class="font-semibold text-sm">${alert.market_title}</p>
+                                    <p class="text-xs opacity-80">${alert.direction.toUpperCase()} | ${alert.cluster || 'Unclustered'}</p>
                                 </div>
-                                <span class="px-2 py-1 text-xs font-medium rounded uppercase">${alert.severity}</span>
+                                <span class="px-2 py-1 text-xs font-medium rounded uppercase bg-gray-800/50">${alert.severity}</span>
                             </div>
-                            <div class="text-sm mb-2">
+                            <div class="text-xs mb-2">
                                 <span class="font-medium">Value:</span> ${formatCurrency(alert.current_value)} |
-                                <span class="font-medium">P&L:</span> <span class="${getPnlClass(alert.unrealized_pnl)}">${formatCurrency(alert.unrealized_pnl)}</span>
+                                <span class="font-medium">P&L:</span> <span class="${getPnlTextColor(alert.unrealized_pnl)}">${formatCurrency(alert.unrealized_pnl)}</span>
                             </div>
-                            <div class="text-sm">
+                            <div class="text-xs">
                                 <span class="font-medium">Issues:</span>
                                 <ul class="list-disc list-inside mt-1">
                                     ${alert.reasons.map(r => `<li>${r}</li>`).join('')}
@@ -584,7 +756,7 @@
             if (e.target === this) hideAlertDetails();
         });
 
-        // Fetch rule-based active alerts
+        // Fetch rule-based active alerts (dark theme)
         async function fetchActiveAlerts() {
             try {
                 const response = await fetch(`${API_BASE}/alerts/active`);
@@ -595,54 +767,54 @@
             }
         }
 
-        // Update active alerts list
+        // Update active alerts list (dark theme)
         function updateActiveAlertsList(data) {
             const container = document.getElementById('active-alerts-list');
             const statusBadge = document.getElementById('alert-system-status');
 
             if (!data.alerts || data.alerts.length === 0) {
-                container.innerHTML = '<div class="flex items-center gap-2 text-green-600"><span>&#10003;</span><p>All clear — no active alerts</p></div>';
+                container.innerHTML = '<div class="flex items-center gap-2 text-green-400"><span>&#10003;</span><p class="text-sm">All clear - no active alerts</p></div>';
                 statusBadge.textContent = 'All Clear';
-                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-green-100 text-green-700';
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-green-900/50 text-green-400';
                 return;
             }
 
             if (data.has_critical) {
                 statusBadge.textContent = `${data.count} CRITICAL`;
-                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 font-medium';
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-red-900/50 text-red-400 font-medium';
             } else if (data.has_warning) {
                 statusBadge.textContent = `${data.count} Warning`;
-                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-700 font-medium';
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-yellow-900/50 text-yellow-400 font-medium';
             } else {
                 statusBadge.textContent = `${data.count} Info`;
-                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700';
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-blue-900/50 text-blue-400';
             }
 
             container.innerHTML = data.alerts.map(alert => {
                 const severityStyles = {
-                    CRITICAL: 'border-l-4 border-red-500 bg-red-50',
-                    WARNING: 'border-l-4 border-yellow-500 bg-yellow-50',
-                    INFO: 'border-l-4 border-blue-500 bg-blue-50',
+                    CRITICAL: 'border-l-4 border-red-500 bg-red-900/20',
+                    WARNING: 'border-l-4 border-yellow-500 bg-yellow-900/20',
+                    INFO: 'border-l-4 border-blue-500 bg-blue-900/20',
                 };
                 const severityBadge = {
-                    CRITICAL: 'bg-red-100 text-red-800',
-                    WARNING: 'bg-yellow-100 text-yellow-800',
-                    INFO: 'bg-blue-100 text-blue-800',
+                    CRITICAL: 'bg-red-900/50 text-red-300',
+                    WARNING: 'bg-yellow-900/50 text-yellow-300',
+                    INFO: 'bg-blue-900/50 text-blue-300',
                 };
                 const style = severityStyles[alert.severity] || severityStyles.INFO;
                 const badge = severityBadge[alert.severity] || severityBadge.INFO;
                 const time = alert.triggered_at ? new Date(alert.triggered_at).toLocaleString() : '';
 
                 return `
-                    <div class="p-3 rounded-lg ${style}">
+                    <div class="p-2 md:p-3 rounded-lg ${style}">
                         <div class="flex justify-between items-start mb-1">
-                            <div class="flex items-center gap-2">
-                                <span class="px-2 py-0.5 text-xs font-medium rounded ${badge}">${alert.severity}</span>
-                                <span class="font-medium text-gray-800 text-sm">${alert.market_name || 'Portfolio'}</span>
+                            <div class="flex items-center gap-2 min-w-0 flex-1">
+                                <span class="px-2 py-0.5 text-xs font-medium rounded flex-shrink-0 ${badge}">${alert.severity}</span>
+                                <span class="font-medium text-gray-100 text-xs md:text-sm truncate">${alert.market_name || 'Portfolio'}</span>
                             </div>
-                            <span class="text-xs text-gray-500">${time}</span>
+                            <span class="text-xs text-gray-500 ml-2 flex-shrink-0 hidden sm:inline">${time}</span>
                         </div>
-                        <p class="text-sm text-gray-700">${alert.message}</p>
+                        <p class="text-xs text-gray-300">${alert.message}</p>
                         <p class="text-xs text-gray-500 mt-1">Action: ${alert.action}</p>
                     </div>
                 `;
@@ -660,7 +832,7 @@
             }
         }
 
-        // Update alert history list
+        // Update alert history list (dark theme)
         function updateAlertHistoryList(data) {
             const container = document.getElementById('alert-history-list');
 
@@ -673,20 +845,20 @@
                 const isActive = event.is_active;
                 const time = event.triggered_at ? new Date(event.triggered_at).toLocaleString() : '';
                 const clearedTime = event.cleared_at ? new Date(event.cleared_at).toLocaleString() : null;
-                const statusBg = isActive ? 'bg-yellow-50' : 'bg-gray-50';
-                const statusText = isActive ? '<span class="text-yellow-600 text-xs font-medium">ACTIVE</span>' :
-                    `<span class="text-green-600 text-xs">cleared ${clearedTime || ''}</span>`;
-                const notifIcon = event.notified ? '<span class="text-green-500 text-xs" title="Notification sent">&#9993;</span>' :
-                    '<span class="text-gray-400 text-xs" title="Not notified">&#9993;</span>';
+                const statusBg = isActive ? 'bg-yellow-900/20' : 'bg-gray-800';
+                const statusText = isActive ? '<span class="text-yellow-400 text-xs font-medium">ACTIVE</span>' :
+                    `<span class="text-green-400 text-xs">cleared ${clearedTime || ''}</span>`;
+                const notifIcon = event.notified ? '<span class="text-green-400 text-xs" title="Notification sent">&#9993;</span>' :
+                    '<span class="text-gray-600 text-xs" title="Not notified">&#9993;</span>';
 
                 return `
-                    <div class="flex justify-between items-center p-2 rounded ${statusBg} text-sm">
-                        <div class="flex items-center gap-2">
+                    <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center p-2 rounded ${statusBg} text-xs">
+                        <div class="flex items-center gap-2 min-w-0 flex-1">
                             ${notifIcon}
-                            <span class="text-xs px-1.5 py-0.5 rounded ${event.severity === 'CRITICAL' ? 'bg-red-100 text-red-700' : event.severity === 'WARNING' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}">${event.severity}</span>
-                            <span class="text-gray-700">${event.market_name || 'Portfolio'}: ${event.message}</span>
+                            <span class="px-1.5 py-0.5 rounded flex-shrink-0 ${event.severity === 'CRITICAL' ? 'bg-red-900/50 text-red-300' : event.severity === 'WARNING' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-blue-900/50 text-blue-300'}">${event.severity}</span>
+                            <span class="text-gray-300 truncate">${event.market_name || 'Portfolio'}: ${event.message}</span>
                         </div>
-                        <div class="flex items-center gap-2 text-xs text-gray-500 whitespace-nowrap">
+                        <div class="flex items-center gap-2 text-xs text-gray-500 mt-1 sm:mt-0 sm:ml-2 flex-shrink-0">
                             ${statusText}
                             <span>${time}</span>
                         </div>
@@ -710,8 +882,98 @@
             }
         }
 
+        // Closed Positions (N6)
+        function toggleClosed() {
+            const container = document.getElementById('closed-positions');
+            const summary = document.getElementById('closed-summary');
+            const icon = document.getElementById('closed-toggle-icon');
+
+            if (container.classList.contains('hidden')) {
+                container.classList.remove('hidden');
+                summary.classList.remove('hidden');
+                icon.innerHTML = '&#9660;';
+                if (!closedPositionsLoaded) {
+                    fetchClosedPositions();
+                    closedPositionsLoaded = true;
+                }
+            } else {
+                container.classList.add('hidden');
+                summary.classList.add('hidden');
+                icon.innerHTML = '&#9654;';
+            }
+        }
+
+        async function fetchClosedPositions() {
+            try {
+                const response = await fetch(`${API_BASE}/positions?status=closed`);
+                const positions = await response.json();
+                updateClosedPositions(positions);
+            } catch (error) {
+                console.error('Failed to fetch closed positions:', error);
+                document.getElementById('closed-positions').innerHTML = '<p class="text-gray-500 text-sm">Failed to load closed positions</p>';
+            }
+        }
+
+        function updateClosedPositions(positions) {
+            const container = document.getElementById('closed-positions');
+            const summaryEl = document.getElementById('closed-summary');
+            const toggleText = document.getElementById('closed-toggle-text');
+
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-sm">No closed positions</p>';
+                toggleText.textContent = 'Closed Positions (none)';
+                return;
+            }
+
+            const wins = positions.filter(p => (parseFloat(p.realized_pnl) || 0) > 0).length;
+            const losses = positions.length - wins;
+            const totalRealized = positions.reduce((sum, p) => sum + (parseFloat(p.realized_pnl) || 0), 0);
+
+            toggleText.textContent = `Closed Positions (${positions.length})`;
+            summaryEl.innerHTML = `${positions.length} closed | ${wins} wins | ${losses} losses | <span class="${getPnlTextColor(totalRealized)}">${totalRealized >= 0 ? '+' : ''}${formatCurrency(totalRealized)} realized</span>`;
+
+            container.innerHTML = positions.map(pos => {
+                const pnl = parseFloat(pos.realized_pnl) || 0;
+                const isWin = pnl > 0;
+                const borderColor = isWin ? 'border-green-600' : 'border-red-600';
+                const pnlColor = getPnlTextColor(pnl);
+
+                return `
+                    <div class="rounded-lg border-l-4 ${borderColor} p-2 mb-1" style="background: rgba(31,41,55,0.5);">
+                        <div class="flex justify-between items-center">
+                            <div class="flex-1 min-w-0 mr-3">
+                                <div class="text-xs font-medium text-gray-300 truncate">${pos.market_title || 'Unknown'}</div>
+                                <div class="text-xs text-gray-500">
+                                    <span class="inline-block px-1 py-0.5 rounded text-xs ${pos.direction === 'yes' ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}">${pos.direction.toUpperCase()}</span>
+                                    <span class="ml-1 px-1 py-0.5 rounded text-xs ${isWin ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}">${isWin ? 'WIN' : 'LOSS'}</span>
+                                </div>
+                            </div>
+                            <div class="text-right flex-shrink-0">
+                                <div class="text-xs font-bold ${pnlColor}">${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // "Last updated" timer (N4)
+        function updateLastUpdatedTimer() {
+            const el = document.getElementById('last-updated');
+            const secondsAgo = Math.floor((Date.now() - lastRefreshTime) / 1000);
+            if (secondsAgo < 5) {
+                el.textContent = 'Updated just now';
+            } else if (secondsAgo < 60) {
+                el.textContent = `Updated ${secondsAgo}s ago`;
+            } else {
+                const min = Math.floor(secondsAgo / 60);
+                el.textContent = `Updated ${min}m ago`;
+            }
+        }
+
         // Initial load
         async function loadAll() {
+            lastRefreshTime = Date.now();
             await Promise.all([
                 fetchPortfolio(),
                 fetchHistory(),
@@ -723,10 +985,19 @@
         }
 
         // Load on page ready
-        document.addEventListener('DOMContentLoaded', loadAll);
+        document.addEventListener('DOMContentLoaded', () => {
+            loadAll();
+            // Default to 7d on mobile
+            if (window.innerWidth < 768) {
+                setRange('7d');
+            }
+        });
 
         // Auto-refresh every 60 seconds
         setInterval(loadAll, 60000);
+
+        // Update "last updated" every second
+        setInterval(updateLastUpdatedTimer, 1000);
     </script>
 </body>
 </html>
