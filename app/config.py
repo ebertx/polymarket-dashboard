@@ -33,8 +33,9 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        from urllib.parse import quote_plus
         return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql+asyncpg://{self.postgres_user}:{quote_plus(self.postgres_password)}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_database}"
         )
 
