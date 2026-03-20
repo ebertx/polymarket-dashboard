@@ -337,10 +337,11 @@
             }).join('');
         }
 
-        // Fetch portfolio history
+        // Fetch portfolio history — get enough data for all time ranges
         async function fetchHistory() {
             try {
-                const response = await fetch(`${API_BASE}/portfolio/history?limit=1000`);
+                // Fetch up to 100K snapshots (covers ~70 days at 1/min)
+                const response = await fetch(`${API_BASE}/portfolio/history?limit=100000`);
                 const data = await response.json();
 
                 if (data.snapshots && data.snapshots.length > 0) {
@@ -367,18 +368,43 @@
             updateHistoryChart();
         }
 
-        // Filter snapshots by range
+        // Filter and downsample snapshots by range
         function getFilteredSnapshots() {
-            if (currentRange === 'all' || !allSnapshots.length) return allSnapshots;
+            if (!allSnapshots.length) return allSnapshots;
             const now = new Date();
-            let cutoff;
+            let cutoff, downsampleMinutes;
             switch (currentRange) {
-                case '1d': cutoff = new Date(now - 24 * 60 * 60 * 1000); break;
-                case '7d': cutoff = new Date(now - 7 * 24 * 60 * 60 * 1000); break;
-                case '30d': cutoff = new Date(now - 30 * 24 * 60 * 60 * 1000); break;
-                default: return allSnapshots;
+                case '1d':
+                    cutoff = new Date(now - 24 * 60 * 60 * 1000);
+                    downsampleMinutes = 5; // 1 point per 5 min = ~288 points
+                    break;
+                case '7d':
+                    cutoff = new Date(now - 7 * 24 * 60 * 60 * 1000);
+                    downsampleMinutes = 30; // 1 point per 30 min = ~336 points
+                    break;
+                case '30d':
+                    cutoff = new Date(now - 30 * 24 * 60 * 60 * 1000);
+                    downsampleMinutes = 120; // 1 point per 2 hours = ~360 points
+                    break;
+                case 'all':
+                default:
+                    cutoff = new Date(0);
+                    downsampleMinutes = 360; // 1 point per 6 hours = manageable
+                    break;
             }
-            return allSnapshots.filter(s => new Date(s.timestamp) >= cutoff);
+            const filtered = allSnapshots.filter(s => new Date(s.timestamp) >= cutoff);
+            // Downsample to keep chart fast
+            if (downsampleMinutes <= 1) return filtered;
+            const result = [];
+            let lastTime = 0;
+            for (const s of filtered) {
+                const t = new Date(s.timestamp).getTime();
+                if (t - lastTime >= downsampleMinutes * 60 * 1000) {
+                    result.push(s);
+                    lastTime = t;
+                }
+            }
+            return result;
         }
 
         // Update history chart

@@ -114,6 +114,9 @@ async def get_positions_needing_attention(db: AsyncSession = Depends(get_db)):
         # Check if market is expiring soon
         if market.end_date:
             end_date = market.end_date if isinstance(market.end_date, datetime) else datetime.combine(market.end_date, datetime.min.time())
+            # Ensure both are offset-naive for comparison
+            if end_date.tzinfo is not None:
+                end_date = end_date.replace(tzinfo=None)
             days_until_expiry = (end_date - now).days
             if days_until_expiry <= 3:
                 reasons.append(f"Expires in {days_until_expiry} days")
