@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -7,6 +7,8 @@ from typing import List
 
 from app.database import get_db
 from app.models import Position, Market, Cluster, Catalyst
+from app.models.alert import AlertDefinition, AlertEvent
+from app.services.alerts import AlertService
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -192,10 +194,138 @@ async def get_alert_summary(db: AsyncSession = Depends(get_db)):
     attention = await get_positions_needing_attention(db)
     review = await get_review_status(db)
 
+    # Also get active rule-based alerts count
+    result = await db.execute(
+        select(func.count(AlertEvent.id))
+        .where(AlertEvent.cleared_at.is_(None))
+    )
+    active_rule_alerts = result.scalar() or 0
+
+    # Get counts by severity
+    result = await db.execute(
+        select(AlertEvent.severity, func.count(AlertEvent.id))
+        .where(AlertEvent.cleared_at.is_(None))
+        .group_by(AlertEvent.severity)
+    )
+    severity_counts = {row[0]: row[1] for row in result.all()}
+
     return {
         "attention_count": attention["count"],
-        "has_critical": attention["has_critical"],
+        "has_critical": attention["has_critical"] or severity_counts.get("CRITICAL", 0) > 0,
         "has_high": attention["has_high"],
         "review_due": review["review_due"],
         "days_until_review": review["days_until_due"],
+        "rule_alerts_active": active_rule_alerts,
+        "rule_severity_counts": severity_counts,
+    }
+
+
+# ----- New rule-based alert endpoints -----
+
+@router.get("/active")
+async def get_active_alerts(db: AsyncSession = Depends(get_db)):
+    """Get currently active (uncleared) rule-based alerts."""
+    alert_service = AlertService(db)
+    active = await alert_service.get_active_alerts()
+
+    severity_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+    active.sort(key=lambda x: severity_order.get(x["severity"], 99))
+
+    return {
+        "alerts": active,
+        "count": len(active),
+        "has_critical": any(a["severity"] == "CRITICAL" for a in active),
+        "has_warning": any(a["severity"] == "WARNING" for a in active),
+    }
+
+
+@router.get("/history")
+async def get_alert_history(
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get alert event history (most recent first)."""
+    alert_service = AlertService(db)
+    history = await alert_service.get_alert_history(limit=limit)
+    return {
+        "events": history,
+        "count": len(history),
+    }
+
+
+@router.get("/definitions")
+async def get_alert_definitions(db: AsyncSession = Depends(get_db)):
+    """Get all alert definitions."""
+    result = await db.execute(
+        select(AlertDefinition).order_by(AlertDefinition.market_slug, AlertDefinition.alert_type)
+    )
+    definitions = result.scalars().all()
+
+    return {
+        "definitions": [
+            {
+                "id": d.id,
+                "slug": d.slug,
+                "market_slug": d.market_slug,
+                "market_name": d.market_name,
+                "direction": d.direction,
+                "alert_type": d.alert_type,
+                "threshold": float(d.threshold) if d.threshold else None,
+                "catalyst_date": d.catalyst_date.isoformat() if d.catalyst_date else None,
+                "catalyst_description": d.catalyst_description,
+                "days_before": d.days_before,
+                "action": d.action,
+                "severity": d.severity,
+                "is_global": d.is_global,
+                "enabled": d.enabled,
+            }
+            for d in definitions
+        ],
+        "count": len(definitions),
+        "enabled_count": sum(1 for d in definitions if d.enabled),
+    }
+
+
+@router.get("/status")
+async def get_alert_system_status(db: AsyncSession = Depends(get_db)):
+    """
+    Overall alert system health check.
+    Returns config status, definition count, active alerts, and last check time.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+
+    # Count definitions
+    result = await db.execute(select(func.count(AlertDefinition.id)))
+    total_defs = result.scalar() or 0
+
+    result = await db.execute(
+        select(func.count(AlertDefinition.id))
+        .where(AlertDefinition.enabled == True)  # noqa: E712
+    )
+    enabled_defs = result.scalar() or 0
+
+    # Count active events
+    result = await db.execute(
+        select(func.count(AlertEvent.id))
+        .where(AlertEvent.cleared_at.is_(None))
+    )
+    active_events = result.scalar() or 0
+
+    # Last triggered event
+    result = await db.execute(
+        select(AlertEvent.triggered_at)
+        .order_by(AlertEvent.triggered_at.desc())
+        .limit(1)
+    )
+    last_triggered = result.scalar()
+
+    return {
+        "enabled": settings.alerts_enabled,
+        "ntfy_configured": bool(settings.ntfy_topic),
+        "ntfy_topic": settings.ntfy_topic if settings.ntfy_topic else None,
+        "definitions_total": total_defs,
+        "definitions_enabled": enabled_defs,
+        "active_alerts": active_events,
+        "last_alert_at": last_triggered.isoformat() if last_triggered else None,
     }

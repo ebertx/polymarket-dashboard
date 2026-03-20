@@ -17,6 +17,10 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD_HASH=${AUTH_PASSWORD_HASH}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ALERTS_ENABLED=${ALERTS_ENABLED:-true}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - NTFY_SERVER=${NTFY_SERVER:-https://ntfy.sh}
+      - STARTING_CAPITAL=${STARTING_CAPITAL:-229.13}
     labels:
       # Traefik labels for reverse proxy
       - "traefik.enable=true"

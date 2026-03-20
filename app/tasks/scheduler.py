@@ -1,5 +1,4 @@
 import logging
-import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -7,6 +6,7 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.services.polymarket import PolymarketClient
 from app.services.tracker import TrackerService
+from app.services.alerts import AlertService
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,41 @@ async def poll_portfolio():
         finally:
             await client.close()
 
+    # Run alert evaluation in a separate session (after prices are committed)
+    if settings.alerts_enabled:
+        await run_alert_check()
+
+
+async def run_alert_check():
+    """
+    Evaluate alert definitions against current position/portfolio state.
+    Sends notifications for newly triggered alerts via ntfy.sh.
+    """
+    logger.debug("Starting alert check...")
+
+    async with AsyncSessionLocal() as db:
+        alert_service = AlertService(db)
+        try:
+            # First, clear alerts whose conditions no longer hold
+            cleared = await alert_service.clear_stale_alerts()
+            if cleared:
+                logger.info(f"Cleared {cleared} stale alerts")
+
+            # Evaluate all alert definitions
+            new_events = await alert_service.evaluate_all_alerts()
+            if new_events:
+                for event in new_events:
+                    logger.info(
+                        f"Alert triggered: [{event.severity}] "
+                        f"{event.market_name or 'Portfolio'}: {event.message}"
+                    )
+                logger.info(f"Total new alerts: {len(new_events)}")
+            else:
+                logger.debug("No new alerts triggered")
+
+        except Exception as e:
+            logger.error(f"Alert check failed: {e}", exc_info=True)
+
 
 def start_scheduler():
     """Start the APScheduler with the polling job."""
@@ -59,6 +94,13 @@ def start_scheduler():
 
     scheduler.start()
     logger.info(f"Scheduler started with {interval}s polling interval")
+    if settings.alerts_enabled:
+        logger.info(
+            f"Alerts enabled. ntfy topic: "
+            f"{'(not configured)' if not settings.ntfy_topic else settings.ntfy_topic}"
+        )
+    else:
+        logger.info("Alerts disabled (ALERTS_ENABLED=false)")
 
 
 def shutdown_scheduler():

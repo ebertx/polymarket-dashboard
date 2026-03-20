@@ -121,6 +121,27 @@
             </div>
         </div>
 
+        <!-- Rule-Based Alerts -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-gray-800">Active Alerts</h2>
+                <div class="flex items-center gap-3">
+                    <span id="alert-system-status" class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-600">checking...</span>
+                    <button onclick="toggleAlertHistory()" class="text-sm text-blue-600 hover:underline">Show History</button>
+                </div>
+            </div>
+            <div id="active-alerts-list" class="space-y-3">
+                <p class="text-gray-500">Loading...</p>
+            </div>
+            <!-- Alert History (hidden by default) -->
+            <div id="alert-history-section" class="hidden mt-6 pt-4 border-t">
+                <h3 class="text-md font-semibold text-gray-700 mb-3">Recent Alert History</h3>
+                <div id="alert-history-list" class="space-y-2 max-h-96 overflow-y-auto">
+                    <p class="text-gray-500">Loading...</p>
+                </div>
+            </div>
+        </div>
+
         <!-- Cluster Exposure Details -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
             <div class="bg-white rounded-lg shadow-md p-6">
@@ -563,6 +584,132 @@
             if (e.target === this) hideAlertDetails();
         });
 
+        // Fetch rule-based active alerts
+        async function fetchActiveAlerts() {
+            try {
+                const response = await fetch(`${API_BASE}/alerts/active`);
+                const data = await response.json();
+                updateActiveAlertsList(data);
+            } catch (error) {
+                console.error('Failed to fetch active alerts:', error);
+            }
+        }
+
+        // Update active alerts list
+        function updateActiveAlertsList(data) {
+            const container = document.getElementById('active-alerts-list');
+            const statusBadge = document.getElementById('alert-system-status');
+
+            if (!data.alerts || data.alerts.length === 0) {
+                container.innerHTML = '<div class="flex items-center gap-2 text-green-600"><span>&#10003;</span><p>All clear — no active alerts</p></div>';
+                statusBadge.textContent = 'All Clear';
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-green-100 text-green-700';
+                return;
+            }
+
+            if (data.has_critical) {
+                statusBadge.textContent = `${data.count} CRITICAL`;
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 font-medium';
+            } else if (data.has_warning) {
+                statusBadge.textContent = `${data.count} Warning`;
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-700 font-medium';
+            } else {
+                statusBadge.textContent = `${data.count} Info`;
+                statusBadge.className = 'text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700';
+            }
+
+            container.innerHTML = data.alerts.map(alert => {
+                const severityStyles = {
+                    CRITICAL: 'border-l-4 border-red-500 bg-red-50',
+                    WARNING: 'border-l-4 border-yellow-500 bg-yellow-50',
+                    INFO: 'border-l-4 border-blue-500 bg-blue-50',
+                };
+                const severityBadge = {
+                    CRITICAL: 'bg-red-100 text-red-800',
+                    WARNING: 'bg-yellow-100 text-yellow-800',
+                    INFO: 'bg-blue-100 text-blue-800',
+                };
+                const style = severityStyles[alert.severity] || severityStyles.INFO;
+                const badge = severityBadge[alert.severity] || severityBadge.INFO;
+                const time = alert.triggered_at ? new Date(alert.triggered_at).toLocaleString() : '';
+
+                return `
+                    <div class="p-3 rounded-lg ${style}">
+                        <div class="flex justify-between items-start mb-1">
+                            <div class="flex items-center gap-2">
+                                <span class="px-2 py-0.5 text-xs font-medium rounded ${badge}">${alert.severity}</span>
+                                <span class="font-medium text-gray-800 text-sm">${alert.market_name || 'Portfolio'}</span>
+                            </div>
+                            <span class="text-xs text-gray-500">${time}</span>
+                        </div>
+                        <p class="text-sm text-gray-700">${alert.message}</p>
+                        <p class="text-xs text-gray-500 mt-1">Action: ${alert.action}</p>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Fetch alert history
+        async function fetchAlertHistory() {
+            try {
+                const response = await fetch(`${API_BASE}/alerts/history?limit=50`);
+                const data = await response.json();
+                updateAlertHistoryList(data);
+            } catch (error) {
+                console.error('Failed to fetch alert history:', error);
+            }
+        }
+
+        // Update alert history list
+        function updateAlertHistoryList(data) {
+            const container = document.getElementById('alert-history-list');
+
+            if (!data.events || data.events.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-sm">No alert history yet</p>';
+                return;
+            }
+
+            container.innerHTML = data.events.map(event => {
+                const isActive = event.is_active;
+                const time = event.triggered_at ? new Date(event.triggered_at).toLocaleString() : '';
+                const clearedTime = event.cleared_at ? new Date(event.cleared_at).toLocaleString() : null;
+                const statusBg = isActive ? 'bg-yellow-50' : 'bg-gray-50';
+                const statusText = isActive ? '<span class="text-yellow-600 text-xs font-medium">ACTIVE</span>' :
+                    `<span class="text-green-600 text-xs">cleared ${clearedTime || ''}</span>`;
+                const notifIcon = event.notified ? '<span class="text-green-500 text-xs" title="Notification sent">&#9993;</span>' :
+                    '<span class="text-gray-400 text-xs" title="Not notified">&#9993;</span>';
+
+                return `
+                    <div class="flex justify-between items-center p-2 rounded ${statusBg} text-sm">
+                        <div class="flex items-center gap-2">
+                            ${notifIcon}
+                            <span class="text-xs px-1.5 py-0.5 rounded ${event.severity === 'CRITICAL' ? 'bg-red-100 text-red-700' : event.severity === 'WARNING' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}">${event.severity}</span>
+                            <span class="text-gray-700">${event.market_name || 'Portfolio'}: ${event.message}</span>
+                        </div>
+                        <div class="flex items-center gap-2 text-xs text-gray-500 whitespace-nowrap">
+                            ${statusText}
+                            <span>${time}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Toggle alert history visibility
+        let alertHistoryLoaded = false;
+        function toggleAlertHistory() {
+            const section = document.getElementById('alert-history-section');
+            if (section.classList.contains('hidden')) {
+                section.classList.remove('hidden');
+                if (!alertHistoryLoaded) {
+                    fetchAlertHistory();
+                    alertHistoryLoaded = true;
+                }
+            } else {
+                section.classList.add('hidden');
+            }
+        }
+
         // Initial load
         async function loadAll() {
             await Promise.all([
@@ -570,7 +717,8 @@
                 fetchHistory(),
                 fetchExposure(),
                 fetchCatalysts(),
-                fetchAlerts()
+                fetchAlerts(),
+                fetchActiveAlerts()
             ]);
         }
 

@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     auth_password_hash: str = ""  # bcrypt hash of password
     jwt_secret_key: str = "change-me-in-production"  # Used for signing JWT tokens
 
+    # Alerts
+    alerts_enabled: bool = True
+    ntfy_topic: str = ""  # e.g. "polymarket-alerts-xyz" — leave empty to disable notifications
+    ntfy_server: str = "https://ntfy.sh"
+    starting_capital: float = 229.13  # Jan 1, 2026 — used for portfolio drawdown calc
+
     @property
     def database_url(self) -> str:
         return (
