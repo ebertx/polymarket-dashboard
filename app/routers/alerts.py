@@ -14,12 +14,26 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
 @router.post("/acknowledge/{event_id}")
-async def acknowledge_alert(event_id: int, db: AsyncSession = Depends(get_db)):
+async def acknowledge_alert_post(event_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Acknowledge an alert event from an ntfy action button.
+    Acknowledge an alert event (POST version).
     Silences re-alerting for 24 hours for the same condition.
     No authentication required (called from ntfy action buttons).
     """
+    return await _acknowledge_event(event_id, db)
+
+
+@router.get("/acknowledge/{event_id}")
+async def acknowledge_alert_get(event_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Acknowledge an alert event (GET version for iOS ntfy compatibility).
+    iOS ntfy app doesn't reliably support HTTP POST action buttons,
+    so we use a 'view' action that opens this URL in the browser.
+    """
+    return await _acknowledge_event(event_id, db)
+
+
+async def _acknowledge_event(event_id: int, db: AsyncSession):
     result = await db.execute(
         select(AlertEvent).where(AlertEvent.id == event_id)
     )
@@ -31,7 +45,7 @@ async def acknowledge_alert(event_id: int, db: AsyncSession = Depends(get_db)):
     event.acknowledged_at = datetime.utcnow()
     await db.commit()
 
-    return {"status": "ok", "message": f"Alert {event_id} acknowledged", "event_id": event_id}
+    return {"status": "ok", "message": f"Alert {event_id} acknowledged — silenced for 24h", "event_id": event_id}
 
 
 @router.get("/positions-needing-attention")

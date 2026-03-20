@@ -411,10 +411,11 @@ class AlertService:
                     }
 
                     # Build action buttons for ntfy
+                    # Use 'view' instead of 'http' for iOS compatibility
                     dashboard_url = self.settings.dashboard_url.rstrip("/")
                     actions = (
-                        f"http, Acknowledge, {dashboard_url}/alerts/acknowledge/{event.id}, method=POST, clear=true; "
-                        f"view, View Dashboard, {dashboard_url}"
+                        f"view, Acknowledge, {dashboard_url}/alerts/acknowledge/{event.id}, clear=true; "
+                        f"view, Dashboard, {dashboard_url}"
                     )
 
                     headers = {
