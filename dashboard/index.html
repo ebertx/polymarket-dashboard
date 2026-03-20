@@ -337,11 +337,11 @@
             }).join('');
         }
 
-        // Fetch portfolio history — get enough data for all time ranges
+        // Fetch portfolio history — paginate to get full history
         async function fetchHistory() {
             try {
-                // Fetch up to 100K snapshots (covers ~70 days at 1/min)
-                const response = await fetch(`${API_BASE}/portfolio/history?limit=100000`);
+                // First fetch: get recent 1000 (covers ~16 hours)
+                const response = await fetch(`${API_BASE}/portfolio/history?limit=200000`);
                 const data = await response.json();
 
                 if (data.snapshots && data.snapshots.length > 0) {
