@@ -276,6 +276,8 @@ class AlertService:
                 }
 
         elif alert_type == "portfolio_drawdown":
+            if portfolio.get("suspect"):
+                return None  # Don't alert on bad snapshot data
             starting = self.settings.starting_capital
             total = portfolio.get("total_value", 0)
             if total and starting:
@@ -288,6 +290,8 @@ class AlertService:
                     }
 
         elif alert_type == "deployment_high":
+            if portfolio.get("suspect"):
+                return None  # Don't alert on bad snapshot data
             total = portfolio.get("total_value", 0)
             pos_value = portfolio.get("position_value", 0)
             if total > 0:
@@ -322,6 +326,13 @@ class AlertService:
 
         cash = float(snap.cash_balance or 0)
         pv = pos_value if float(snap.position_value or 0) == 0 else float(snap.position_value)
+
+        # Sanity check: if cash is 0 but positions exist, the snapshot is likely bad
+        # (failed to fetch cash balance). Skip alerting on bad data.
+        if cash == 0 and pv > 0:
+            logger.warning(f"Suspect snapshot: cash=0, positions=${pv:.2f}. Using position value only.")
+            return {"cash": 0, "position_value": pv, "total_value": pv, "suspect": True}
+
         return {"cash": cash, "position_value": pv, "total_value": cash + pv}
 
     async def _should_alert(self, defn: AlertDefinition, now: datetime) -> bool:
