@@ -24,8 +24,27 @@ import yaml
 # ---------------------------------------------------------------------------
 
 
+def _resolve_db_host():
+    """Try local IP, then Tailscale, then DNS — return first reachable host."""
+    import socket
+    candidates = [
+        os.getenv("HOME_DB_HOST", "192.168.0.166"),
+        os.getenv("HOME_DB_HOST_TAILSCALE", "100.92.27.16"),
+        os.getenv("HOME_DB_HOST_DNS", "ebertx.duckdns.org"),
+    ]
+    port = int(os.getenv("HOME_DB_PORT") or os.getenv("POSTGRES_PORT", 5432))
+    for host in candidates:
+        try:
+            sock = socket.create_connection((host, port), timeout=2)
+            sock.close()
+            return host
+        except (socket.timeout, socket.error, OSError):
+            continue
+    return candidates[0]
+
+
 def get_connection():
-    """Get a psycopg2 connection."""
+    """Get a psycopg2 connection. Auto-detects best host (local/Tailscale/DNS)."""
     import psycopg2
 
     # Try loading from dotenv
@@ -43,11 +62,11 @@ def get_connection():
     except ImportError:
         pass
 
-    host = os.getenv("POSTGRES_HOST") or os.getenv("HOME_DB_HOST") or "ebertx.duckdns.org"
-    port = os.getenv("POSTGRES_PORT") or os.getenv("HOME_DB_PORT") or "5432"
-    user = os.getenv("POSTGRES_USER") or os.getenv("HOME_DB_USER") or "ebertx"
-    password = os.getenv("POSTGRES_PASSWORD") or os.getenv("HOME_DB_PASSWORD") or ""
-    database = os.getenv("POSTGRES_DATABASE") or os.getenv("POLYBOT_DB_NAME") or "polybot"
+    host = _resolve_db_host()
+    port = os.getenv("HOME_DB_PORT") or os.getenv("POSTGRES_PORT") or "5432"
+    user = os.getenv("HOME_DB_USER") or os.getenv("POSTGRES_USER") or "ebertx"
+    password = os.getenv("HOME_DB_PASSWORD") or os.getenv("POSTGRES_PASSWORD") or ""
+    database = os.getenv("POLYBOT_DB_NAME") or os.getenv("POSTGRES_DATABASE") or "polybot"
 
     conn = psycopg2.connect(
         host=host, port=port, user=user, password=password,
