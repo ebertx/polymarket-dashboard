@@ -25,16 +25,17 @@ async def poll_portfolio():
         tracker = TrackerService(db, client)
 
         try:
-            # Take portfolio snapshot
+            # Take portfolio snapshot. This internally runs:
+            #   1. _sync_positions (Data API — discover, share counts, auto-close)
+            #   2. _refresh_prices_from_clob (CLOB midpoints overwrite Data API
+            #      prices + per-position snapshots are created with CLOB values)
+            #   3. Portfolio snapshot computed from CLOB-based totals
+            # The separate update_position_prices() call is no longer needed.
             snapshot = await tracker.take_portfolio_snapshot()
             if snapshot:
                 logger.info(
                     f"Snapshot complete: total=${snapshot.total_value:.2f}"
                 )
-
-            # Update position prices
-            updated = await tracker.update_position_prices()
-            logger.info(f"Updated prices for {updated} positions")
 
         except Exception as e:
             logger.error(f"Portfolio poll failed: {e}", exc_info=True)

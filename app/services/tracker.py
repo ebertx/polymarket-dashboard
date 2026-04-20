@@ -4,7 +4,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import PortfolioSnapshot, Position, PositionSnapshot, Market
@@ -31,17 +31,37 @@ class TrackerService:
         """
         Fetch current wallet state and store a portfolio snapshot.
         Also updates position prices and creates position snapshots.
+
+        Flow:
+          1. Sync positions from Data API (discover, share counts, auto-close).
+          2. Overwrite prices with CLOB midpoints — source of truth that
+             matches the Polymarket UI. Data API curPrice occasionally
+             returns glitched values (Apr 20 2026: 2 positions were ~3x
+             inflated for ~5 min, baking a $13.50 error into the snapshot).
+          3. Compute snapshot totals from DB after the CLOB refresh.
         """
         try:
             wallet_data = await self.client.get_wallet_balance()
 
             cash_balance = wallet_data["usdc_balance"]
-            position_value = wallet_data["total_position_value"]
             api_positions = wallet_data["positions"]
 
+            # Step 1: sync position state from Data API (no position_snapshots yet).
+            await self._sync_positions(api_positions)
+
+            # Step 2: overwrite prices with CLOB midpoints and create
+            # per-position snapshots with the authoritative values.
+            clob_refreshed = await self._refresh_prices_from_clob()
+
+            # Step 3: compute totals from DB (CLOB-based).
+            result = await self.db.execute(
+                select(func.coalesce(func.sum(Position.current_value), 0))
+                .where(Position.status == "open")
+            )
+            position_value = Decimal(str(result.scalar_one() or 0))
             total_value = cash_balance + position_value
 
-            # Get previous snapshot for daily PnL calculation
+            # Previous snapshot for daily PnL calculation
             result = await self.db.execute(
                 select(PortfolioSnapshot)
                 .order_by(PortfolioSnapshot.timestamp.desc())
@@ -56,7 +76,6 @@ class TrackerService:
                 if prev_snapshot.total_value > 0:
                     daily_pnl_pct = (daily_pnl / prev_snapshot.total_value) * 100
 
-            # Create portfolio snapshot
             snapshot = PortfolioSnapshot(
                 timestamp=datetime.now(timezone.utc),
                 cash_balance=cash_balance,
@@ -68,15 +87,13 @@ class TrackerService:
             )
             self.db.add(snapshot)
 
-            # Update positions and create position snapshots
-            await self._sync_positions(api_positions)
-
             await self.db.commit()
             await self.db.refresh(snapshot)
 
             logger.info(
                 f"Portfolio snapshot created: total=${total_value:.2f}, "
-                f"positions=${position_value:.2f}"
+                f"positions=${position_value:.2f} "
+                f"({clob_refreshed} positions refreshed from CLOB)"
             )
             return snapshot
 
@@ -84,6 +101,55 @@ class TrackerService:
             logger.error(f"Failed to take portfolio snapshot: {e}")
             await self.db.rollback()
             raise
+
+    async def _refresh_prices_from_clob(self) -> int:
+        """
+        Overwrite open position prices with CLOB midpoints (source of truth)
+        and create a PositionSnapshot per position using those CLOB values.
+
+        Does NOT commit — caller handles the transaction.
+        Returns the number of positions whose CLOB price fetch succeeded.
+        """
+        result = await self.db.execute(
+            select(Position, Market)
+            .join(Market, Position.market_id == Market.id)
+            .where(Position.status == "open")
+        )
+        rows = result.all()
+
+        updated = 0
+        now = datetime.now(timezone.utc)
+        for position, market in rows:
+            try:
+                token_id = (
+                    market.clob_token_id_yes if position.direction == "yes"
+                    else market.clob_token_id_no
+                )
+                if not token_id:
+                    continue
+
+                price = await self.client.get_market_price(token_id)
+                if price is None:
+                    continue
+
+                value = position.shares * price
+                position.current_price = price
+                position.current_value = value
+                position.unrealized_pnl = value - position.cost_basis
+
+                self.db.add(PositionSnapshot(
+                    position_id=position.id,
+                    timestamp=now,
+                    price=price,
+                    value=value,
+                ))
+                updated += 1
+            except Exception as e:
+                logger.warning(
+                    f"Failed to refresh CLOB price for position {position.id}: {e}"
+                )
+
+        return updated
 
     async def _sync_positions(self, api_positions: List[Dict]) -> None:
         """Sync positions from API with database - update prices for open positions."""
@@ -151,19 +217,13 @@ class TrackerService:
                         f"(sold {shares_sold})"
                     )
 
-            # Update position
+            # Update position with Data API price as an interim value; the
+            # caller (take_portfolio_snapshot) overwrites these with CLOB
+            # midpoints via _refresh_prices_from_clob, which also creates
+            # the authoritative PositionSnapshot.
             position.current_price = current_price
             position.current_value = value
             position.unrealized_pnl = value - position.cost_basis
-
-            # Create position snapshot
-            pos_snapshot = PositionSnapshot(
-                position_id=position.id,
-                timestamp=datetime.now(timezone.utc),
-                price=current_price,
-                value=value,
-            )
-            self.db.add(pos_snapshot)
 
         # Auto-discover new positions not yet in DB
         if unknown_api_positions:
