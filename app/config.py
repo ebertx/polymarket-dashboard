@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     # Polymarket
     polymarket_wallet: str = ""
+    polymarket_private_key: str = ""  # required for CLOB collateral balance fetch
+    polymarket_signature_type: int = 1  # 0=eoa, 1=proxy (Magic/email wallets), 2=gnosis-safe
 
     # Polling
     poll_interval_seconds: int = 60

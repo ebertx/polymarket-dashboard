@@ -21,7 +21,7 @@ async def poll_portfolio():
     logger.info("Starting scheduled portfolio poll...")
 
     async with AsyncSessionLocal() as db:
-        client = PolymarketClient(settings.polymarket_wallet)
+        client = PolymarketClient.from_settings(settings)
         tracker = TrackerService(db, client)
 
         try:

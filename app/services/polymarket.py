@@ -1,8 +1,12 @@
+import asyncio
 import aiohttp
 import logging
 from decimal import Decimal
 from typing import Dict, List, Optional, Any
-from web3 import Web3
+
+from py_clob_client.client import ClobClient
+from py_clob_client.constants import POLYGON
+from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
 
 logger = logging.getLogger(__name__)
 
@@ -10,72 +14,87 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 CLOB_API_BASE = "https://clob.polymarket.com"
 
-# Polygon RPC and USDC contract (list of fallbacks in priority order)
-POLYGON_RPC_LIST = [
-    "https://polygon-bor-rpc.publicnode.com",
-    "https://1rpc.io/matic",
-    "https://polygon-rpc.com",
-]
-USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e on Polygon
-
-# Minimal ERC20 ABI for balanceOf
-ERC20_ABI = [
-    {
-        "constant": True,
-        "inputs": [{"name": "_owner", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"name": "balance", "type": "uint256"}],
-        "type": "function",
-    }
-]
+# Process-wide cache for the authenticated CLOB client. The L1→L2 derive
+# call (~500ms) only needs to happen once per process; subsequent balance
+# fetches reuse the cached creds and take ~150ms.
+_clob_client_cache: Optional[ClobClient] = None
 
 
 class PolymarketClient:
-    def __init__(self, wallet_address: str):
+    def __init__(
+        self,
+        wallet_address: str,
+        private_key: Optional[str] = None,
+        signature_type: int = 1,
+    ):
         self.wallet_address = wallet_address.lower()
+        self.private_key = private_key or None  # treat empty string as None
+        self.signature_type = signature_type
         self._session: Optional[aiohttp.ClientSession] = None
-        self._web3: Optional[Web3] = None
+
+    @classmethod
+    def from_settings(cls, settings) -> "PolymarketClient":
+        return cls(
+            wallet_address=settings.polymarket_wallet,
+            private_key=settings.polymarket_private_key or None,
+            signature_type=settings.polymarket_signature_type,
+        )
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    def _get_web3(self) -> Web3:
-        if self._web3 is None:
-            for rpc in POLYGON_RPC_LIST:
-                try:
-                    w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 10}))
-                    # Quick connectivity test
-                    w3.eth.chain_id
-                    self._web3 = w3
-                    logger.info(f"Connected to Polygon RPC: {rpc}")
-                    break
-                except Exception as e:
-                    logger.warning(f"Polygon RPC {rpc} failed: {e}")
-            if self._web3 is None:
-                raise RuntimeError("All Polygon RPC endpoints failed")
-        return self._web3
-
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
 
-    def get_usdc_balance(self) -> Decimal:
-        """Fetch USDC balance from Polygon network."""
-        try:
-            w3 = self._get_web3()
-            contract = w3.eth.contract(
-                address=Web3.to_checksum_address(USDC_CONTRACT),
-                abi=ERC20_ABI
+    def _build_clob_client(self) -> ClobClient:
+        global _clob_client_cache
+        if _clob_client_cache is not None:
+            return _clob_client_cache
+        client = ClobClient(
+            CLOB_API_BASE,
+            key=self.private_key,
+            chain_id=POLYGON,
+            signature_type=self.signature_type,
+            funder=self.wallet_address,
+        )
+        creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+        _clob_client_cache = client
+        logger.info("Derived Polymarket CLOB API credentials (cached for process lifetime)")
+        return client
+
+    def _fetch_collateral_balance_sync(self) -> Decimal:
+        client = self._build_clob_client()
+        result = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        # CLOB returns the collateral balance as a string in 6-decimal USDC units
+        # (e.g. "179174679" for $179.17). Polymarket's "major upgrade" moved
+        # collateral off the Polygon USDC.e ERC20, so reading balanceOf() on
+        # 0x2791... returns 0 for funded wallets — the CLOB API is now the
+        # only authoritative source for cash balance.
+        raw = result.get("balance", "0")
+        return Decimal(raw) / Decimal(10 ** 6)
+
+    async def get_usdc_balance(self) -> Decimal:
+        """Fetch USDC collateral balance from the Polymarket CLOB API.
+
+        Returns Decimal("0") and logs a warning if no private key is configured
+        (tracker can run without trading creds, but cash balance will be unavailable).
+        """
+        if not self.private_key:
+            logger.warning(
+                "POLYMARKET_PRIVATE_KEY not configured — cash balance will report 0. "
+                "Set it in the environment to enable accurate portfolio totals."
             )
-            balance_wei = contract.functions.balanceOf(
-                Web3.to_checksum_address(self.wallet_address)
-            ).call()
-            # USDC has 6 decimals
-            return Decimal(balance_wei) / Decimal(10 ** 6)
+            return Decimal("0")
+        try:
+            return await asyncio.to_thread(self._fetch_collateral_balance_sync)
         except Exception as e:
-            logger.error(f"Failed to fetch USDC balance: {e}")
+            logger.error(f"Failed to fetch USDC balance from CLOB API: {e}")
             return Decimal("0")
 
     async def _request(self, url: str, params: Optional[Dict] = None) -> Any:
@@ -135,8 +154,8 @@ class PolymarketClient:
                 logger.warning(f"Failed to process position: {pos}, error: {e}")
                 continue
 
-        # Fetch USDC balance from Polygon
-        usdc_balance = self.get_usdc_balance()
+        # Fetch USDC collateral balance from the CLOB API
+        usdc_balance = await self.get_usdc_balance()
 
         return {
             "usdc_balance": usdc_balance,

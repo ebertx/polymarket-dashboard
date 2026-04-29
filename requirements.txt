@@ -10,8 +10,10 @@ greenlet==3.0.3
 # HTTP client
 aiohttp==3.9.3
 
-# Web3 for USDC balance
-web3==6.15.1
+# Polymarket CLOB SDK — replaces direct Polygon RPC for cash balance
+# (post-platform-upgrade USDC.balanceOf returns 0; CLOB API is now the
+# only source of truth for collateral balance).
+py-clob-client==0.34.5
 
 # Settings management
 pydantic-settings==2.1.0

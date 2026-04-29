@@ -79,6 +79,18 @@ docker logs -f polymarket-tracker  # Follow logs
 - Database: `polybot`
 - Credentials in `.env` file
 
+## Required env vars (`.env` on server: `/mnt/user/appdata/polymarket-tracker/.env`)
+
+| Var | Purpose |
+|-----|---------|
+| `POSTGRES_*` | DB connection |
+| `POLYMARKET_WALLET` | Funder/proxy address (e.g. `0xf7cc...`) — used by the data API for positions |
+| `POLYMARKET_PRIVATE_KEY` | EOA private key that owns the proxy. **Required for cash balance.** Polymarket's platform upgrade moved collateral off the Polygon USDC.e ERC20, so the tracker must hit the CLOB API (which requires L1→L2 signed auth). Without this, cash balance reports $0 and the dashboard total is distorted. |
+| `POLYMARKET_SIGNATURE_TYPE` | `0` EOA / `1` proxy (default for Magic/email wallets) / `2` gnosis-safe |
+| `AUTH_*`, `JWT_SECRET_KEY` | Dashboard login |
+| `NTFY_TOPIC` | Push notifications |
+| `STARTING_CAPITAL` | Drawdown calc baseline |
+
 ## Authentication
 
 - Username: `admin`

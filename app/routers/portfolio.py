@@ -14,7 +14,7 @@ router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 async def get_current_portfolio(db: AsyncSession = Depends(get_db)):
     """Get current portfolio state including all open positions."""
     settings = get_settings()
-    client = PolymarketClient(settings.polymarket_wallet)
+    client = PolymarketClient.from_settings(settings)
     tracker = TrackerService(db, client)
 
     try:
@@ -56,7 +56,7 @@ async def get_portfolio_history(
 ):
     """Get portfolio snapshot history."""
     settings = get_settings()
-    client = PolymarketClient(settings.polymarket_wallet)
+    client = PolymarketClient.from_settings(settings)
     tracker = TrackerService(db, client)
 
     try:
@@ -73,7 +73,7 @@ async def get_portfolio_history(
 async def take_snapshot(db: AsyncSession = Depends(get_db)):
     """Manually trigger a portfolio snapshot."""
     settings = get_settings()
-    client = PolymarketClient(settings.polymarket_wallet)
+    client = PolymarketClient.from_settings(settings)
     tracker = TrackerService(db, client)
 
     try:

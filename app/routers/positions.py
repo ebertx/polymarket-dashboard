@@ -343,7 +343,7 @@ async def get_position_history(
         raise HTTPException(status_code=404, detail="Position not found")
 
     settings = get_settings()
-    client = PolymarketClient(settings.polymarket_wallet)
+    client = PolymarketClient.from_settings(settings)
     tracker = TrackerService(db, client)
 
     try:
