@@ -217,6 +217,30 @@ class TrackerService:
                         f"(sold {shares_sold})"
                     )
 
+            # Self-heal the cost-basis artifact. A position auto-discovered in
+            # the brief window after a fill — before the Data API has computed
+            # avgPrice — gets inserted with entry_price/cost_basis = 0 and was
+            # never corrected (this loop only updated price/value). Once the API
+            # reports a real avg_price, backfill it. Guarded to the zero case so
+            # a legitimately-set basis is never overwritten.
+            api_avg = pos_data.get("avg_price")
+            if api_avg is not None:
+                api_avg = Decimal(str(api_avg))
+                basis_missing = (
+                    position.cost_basis is None
+                    or position.cost_basis == 0
+                    or position.entry_price is None
+                    or position.entry_price == 0
+                )
+                if api_avg > 0 and basis_missing:
+                    position.entry_price = api_avg
+                    position.cost_basis = position.shares * api_avg
+                    logger.info(
+                        f"Position {position.id} cost-basis backfilled "
+                        f"(race-condition artifact): entry={api_avg}, "
+                        f"cost_basis={position.cost_basis}"
+                    )
+
             # Update position with Data API price as an interim value; the
             # caller (take_portfolio_snapshot) overwrites these with CLOB
             # midpoints via _refresh_prices_from_clob, which also creates
@@ -500,6 +524,15 @@ class TrackerService:
                 avg_price = pos_data.get("avg_price", Decimal("0"))
                 if isinstance(avg_price, (int, float, str)):
                     avg_price = Decimal(str(avg_price))
+                if avg_price == 0:
+                    # Data API hasn't computed avgPrice yet (fresh fill). Track
+                    # the position now; _sync_positions self-heals the cost
+                    # basis once the API reports a real avg_price next cycle.
+                    logger.warning(
+                        f"Auto-discover: '{title}' {direction} has avg_price=0 "
+                        f"(Data API lag) — inserting with cost_basis=0, will "
+                        f"self-heal on next sync."
+                    )
                 current_price = pos_data.get("current_price", Decimal("0"))
                 if isinstance(current_price, (int, float, str)):
                     current_price = Decimal(str(current_price))
