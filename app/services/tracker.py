@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import PortfolioSnapshot, Position, PositionSnapshot, Market
+from app.services.cost_basis import resolve_cost_basis
 from app.services.polymarket import PolymarketClient
 from app.services.alerts import AlertService
 
@@ -202,44 +203,45 @@ class TrackerService:
             value = pos_data.get("value", Decimal("0"))
             api_size = pos_data.get("size")
 
-            # Sync share count if API reports different size (e.g., partial sell)
+            # Sync share count if API reports a different size (add or sell).
+            old_shares = position.shares
             if api_size is not None:
                 api_shares = Decimal(str(api_size))
                 if api_shares != position.shares and api_shares > 0:
-                    old_shares = position.shares
-                    shares_sold = old_shares - api_shares
-                    # Adjust cost basis proportionally
-                    if old_shares > 0:
-                        position.cost_basis = position.cost_basis * (api_shares / old_shares)
+                    delta = api_shares - old_shares
                     position.shares = api_shares
                     logger.info(
-                        f"Position {position.id} shares updated: {old_shares} -> {api_shares} "
-                        f"(sold {shares_sold})"
+                        f"Position {position.id} shares updated: {old_shares} -> "
+                        f"{api_shares} ({'added' if delta > 0 else 'sold'} {abs(delta)})"
                     )
 
-            # Self-heal the cost-basis artifact. A position auto-discovered in
-            # the brief window after a fill — before the Data API has computed
-            # avgPrice — gets inserted with entry_price/cost_basis = 0 and was
-            # never corrected (this loop only updated price/value). Once the API
-            # reports a real avg_price, backfill it. Guarded to the zero case so
-            # a legitimately-set basis is never overwritten.
-            api_avg = pos_data.get("avg_price")
-            if api_avg is not None:
-                api_avg = Decimal(str(api_avg))
-                basis_missing = (
-                    position.cost_basis is None
-                    or position.cost_basis == 0
-                    or position.entry_price is None
-                    or position.entry_price == 0
+            # Re-derive the cost basis from the Data API's avg_price, which is
+            # authoritative for the currently-open shares. This self-heals the
+            # historical artifact where a frozen entry_price was scaled
+            # proportionally on an add (overstating cost_basis) or left stale,
+            # and still handles the post-fill lag window (avg_price None/0) via
+            # proportional fallback. See resolve_cost_basis() for the rules.
+            api_avg_raw = pos_data.get("avg_price")
+            api_avg = Decimal(str(api_avg_raw)) if api_avg_raw is not None else None
+            prev_cost_basis = position.cost_basis
+            new_entry_price, new_cost_basis = resolve_cost_basis(
+                api_avg=api_avg,
+                shares=position.shares,
+                old_shares=old_shares,
+                old_entry_price=position.entry_price,
+                old_cost_basis=position.cost_basis,
+            )
+            if new_entry_price is not None:
+                position.entry_price = new_entry_price
+            if new_cost_basis is not None:
+                position.cost_basis = new_cost_basis
+            if new_cost_basis is not None and prev_cost_basis != new_cost_basis:
+                logger.info(
+                    f"Position {position.id} cost-basis resynced: "
+                    f"{prev_cost_basis} -> {new_cost_basis} "
+                    f"(entry={new_entry_price}, shares={position.shares}, "
+                    f"avg_price={api_avg})"
                 )
-                if api_avg > 0 and basis_missing:
-                    position.entry_price = api_avg
-                    position.cost_basis = position.shares * api_avg
-                    logger.info(
-                        f"Position {position.id} cost-basis backfilled "
-                        f"(race-condition artifact): entry={api_avg}, "
-                        f"cost_basis={position.cost_basis}"
-                    )
 
             # Update position with Data API price as an interim value; the
             # caller (take_portfolio_snapshot) overwrites these with CLOB
