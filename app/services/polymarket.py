@@ -8,6 +8,8 @@ from py_clob_client.client import ClobClient
 from py_clob_client.constants import POLYGON
 from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
 
+from app.services.position_filter import own_positions
+
 logger = logging.getLogger(__name__)
 
 DATA_API_BASE = "https://data-api.polymarket.com"
@@ -108,13 +110,31 @@ class PolymarketClient:
             raise
 
     async def get_wallet_positions(self) -> List[Dict]:
-        """Fetch all positions for the wallet from the data API."""
+        """Fetch all positions for the wallet from the data API.
+
+        Guards against a Data API failure mode (2026-06-29): a query for our
+        wallet intermittently returned another account's positions, which the
+        tracker then auto-discovered/auto-closed, booking phantom realized P&L.
+        Each position echoes its owner in ``proxyWallet``; drop any that aren't
+        ours before they reach _sync_positions.
+        """
         url = f"{DATA_API_BASE}/positions"
         params = {"user": self.wallet_address}
 
         try:
             data = await self._request(url, params)
-            return data if isinstance(data, list) else []
+            positions = data if isinstance(data, list) else []
+            ours, foreign = own_positions(positions, self.wallet_address)
+            if foreign:
+                logger.warning(
+                    "Dropped %d Data API position(s) NOT owned by %s "
+                    "(proxyWallet mismatch — Polymarket API likely returned "
+                    "another account's data). Samples: %s",
+                    len(foreign),
+                    self.wallet_address,
+                    [(p.get("title"), p.get("proxyWallet")) for p in foreign[:3]],
+                )
+            return ours
         except Exception as e:
             logger.error(f"Failed to fetch positions: {e}")
             return []
