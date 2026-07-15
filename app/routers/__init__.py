@@ -4,5 +4,6 @@ from app.routers.exposure import router as exposure_router
 from app.routers.alerts import router as alerts_router
 from app.routers.freshness import router as freshness_router
 from app.routers.auth import router as auth_router
+from app.routers.docs import router as docs_router
 
-__all__ = ["portfolio_router", "positions_router", "exposure_router", "alerts_router", "freshness_router", "auth_router"]
+__all__ = ["portfolio_router", "positions_router", "exposure_router", "alerts_router", "freshness_router", "auth_router", "docs_router"]

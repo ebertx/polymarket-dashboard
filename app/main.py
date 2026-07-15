@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.database import engine
-from app.routers import portfolio_router, positions_router, exposure_router, alerts_router, freshness_router, auth_router
+from app.routers import portfolio_router, positions_router, exposure_router, alerts_router, freshness_router, auth_router, docs_router
 from app.tasks import start_scheduler, shutdown_scheduler
 from app.auth import AuthMiddleware
 
@@ -104,6 +104,7 @@ app = FastAPI(
     description="Real-time Polymarket portfolio tracking service",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url="/api-docs",
 )
 
 # CORS middleware
@@ -125,6 +126,7 @@ app.include_router(positions_router)
 app.include_router(exposure_router)
 app.include_router(alerts_router)
 app.include_router(freshness_router)
+app.include_router(docs_router)
 
 
 @app.get("/health")

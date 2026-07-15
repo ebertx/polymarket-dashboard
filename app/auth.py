@@ -112,6 +112,7 @@ class AuthMiddleware:
         "/login",
         "/auth/login",
         "/health",
+        "/api-docs",
         "/docs",
         "/openapi.json",
         "/redoc",
@@ -120,6 +121,7 @@ class AuthMiddleware:
     EXCLUDED_PREFIXES = (
         "/static/",
         "/alerts/acknowledge/",  # ntfy action buttons (no auth)
+        "/docs/",  # signed-link markdown viewer enforces auth in-route
     )
 
     def __init__(self, app):
