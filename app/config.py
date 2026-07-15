@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     starting_capital: float = 229.13  # Jan 1, 2026 — used for portfolio drawdown calc
     dashboard_url: str = "https://polymarket.ebertx.com"  # used for ntfy action buttons
 
+    # Docs viewer (/docs) — serves polymarket-team markdown from GitHub
+    github_docs_token: str = ""  # fine-grained read-only PAT for ebertx/polymarket-team
+    docs_link_secret: str = ""   # HMAC secret shared with Kryten's doc_link.py
+
     @property
     def database_url(self) -> str:
         from urllib.parse import quote_plus

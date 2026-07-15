@@ -32,3 +32,6 @@ python-multipart==0.0.9
 
 # YAML parsing
 pyyaml==6.0.1
+
+# Markdown rendering for /docs viewer
+markdown==3.6
