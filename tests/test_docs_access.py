@@ -32,3 +32,11 @@ def test_normalize_path_rejects_bad_paths():
     assert normalize_path("markets//foo.md") is None                 # empty segment
     assert normalize_path("markets/foo.txt") is None                 # not markdown
     assert normalize_path("") is None
+
+
+def test_extensionless_url_resolves_to_md_path():
+    # Route-level convention: /docs/<path-without-.md> resolves by appending
+    # ".md" when the raw path fails normalization (Telegram download fix).
+    raw = "markets/foo/bar"
+    assert normalize_path(raw) is None
+    assert normalize_path(raw + ".md") == "markets/foo/bar.md"

@@ -46,7 +46,10 @@ async def docs_index(request: Request):
 
 @router.get("/docs/{doc_path:path}")
 async def docs_view(doc_path: str, request: Request, k: str = "", raw: int = 0):
-    path = normalize_path(doc_path)
+    # Accept extension-less URLs too: Telegram/mobile in-app browsers treat a
+    # URL path ending in .md as a file download, so shared links omit the
+    # extension (the signature is always over the canonical .md path).
+    path = normalize_path(doc_path) or normalize_path(doc_path + ".md")
     if path is None:
         return PlainTextResponse("not found", status_code=404)
     settings = get_settings()
