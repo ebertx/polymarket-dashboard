@@ -45,6 +45,11 @@ class Position(Base):
     analysis_folder = Column(String(255))
     entry_reasoning = Column(Text)
     exit_reasoning = Column(Text)
+    # Consecutive sync cycles this position has been absent from the Data API.
+    # Persisted (rather than held in a module-level dict) so a container restart
+    # doesn't reset progress toward AUTO_CLOSE_MISS_THRESHOLD. Added by the
+    # idempotent ALTER in app/main.py's lifespan.
+    api_miss_count = Column(Integer, nullable=False, server_default="0", default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

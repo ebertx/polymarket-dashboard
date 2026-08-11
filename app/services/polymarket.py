@@ -168,6 +168,12 @@ class PolymarketClient:
                     "value": value,
                     "unrealized_pnl": (current_price - avg_price) * size,
                     "realized_pnl": Decimal(str(pos.get("realizedPnl", 0))),
+                    # A redeemable position is a settled one: the market has
+                    # resolved and the shares are waiting to be cashed out.
+                    # Redemption (not resolution) is what removes a position
+                    # from this endpoint, so this flag is the tracker's only
+                    # in-payload resolution signal.
+                    "redeemable": bool(pos.get("redeemable", False)),
                 })
                 total_value += value
             except (ValueError, TypeError) as e:
@@ -238,6 +244,52 @@ class PolymarketClient:
         except Exception as e:
             logger.warning(f"Market search failed: {e}")
             return []
+
+    async def get_market_resolution(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch resolution state for the market that owns ``token_id``.
+
+        Gamma's /markets endpoint hides closed markets unless ``closed=true`` is
+        passed explicitly (verified 2026-08-11: a resolved market's token yields
+        an empty list without it, and an open market's token yields an empty
+        list *with* it). So an empty response here means "not closed yet", not
+        "unknown market" — which is exactly the signal the caller needs.
+
+        Returns the normalized dict consumed by
+        ``app.services.resolution.parse_resolution``, or None if the request
+        failed (so a Gamma outage is distinguishable from "not resolved").
+        """
+        url = f"{GAMMA_API_BASE}/markets"
+        params = {"clob_token_ids": token_id, "closed": "true"}
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        session = await self._get_session()
+        try:
+            async with session.get(url, params=params, headers=headers, timeout=30) as response:
+                response.raise_for_status()
+                data = await response.json()
+        except Exception as e:
+            logger.warning(f"Gamma resolution lookup failed for token {token_id}: {e}")
+            return None
+
+        if not isinstance(data, list) or not data:
+            return {
+                "closed": False,
+                "uma_status": None,
+                "outcome_prices": None,
+                "closed_time": None,
+                "slug": None,
+            }
+
+        market = data[0]
+        return {
+            "closed": bool(market.get("closed")),
+            "uma_status": market.get("umaResolutionStatus"),
+            "outcome_prices": market.get("outcomePrices"),
+            # closedTime is when the market actually settled; umaEndDate is the
+            # same instant on resolved markets and a usable fallback.
+            "closed_time": market.get("closedTime") or market.get("umaEndDate"),
+            "slug": market.get("slug"),
+        }
 
     async def lookup_market_by_token_id(self, token_id: str) -> Optional[Dict]:
         """Look up market metadata from Gamma API by CLOB token ID.

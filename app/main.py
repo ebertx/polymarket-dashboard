@@ -30,6 +30,28 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Polymarket Tracker service...")
 
+    # Schema additions this codebase depends on (idempotent).
+    # positions.api_miss_count is declared on the ORM model, so every position
+    # query fails if this ALTER doesn't land — hence the loud error rather than
+    # the softer warning used for the alert tables below.
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                DO $$ BEGIN
+                    ALTER TABLE positions
+                        ADD COLUMN api_miss_count INTEGER NOT NULL DEFAULT 0;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$
+            """))
+        logger.info("Schema ensured: positions.api_miss_count")
+    except Exception as e:
+        logger.error(
+            f"FATAL-ISH: could not add positions.api_miss_count ({e}). "
+            f"Position syncing will fail until this column exists.",
+            exc_info=True,
+        )
+
     # Ensure alert tables exist (idempotent)
     try:
         async with engine.begin() as conn:

@@ -11,15 +11,32 @@ from app.models import PortfolioSnapshot, Position, PositionSnapshot, Market
 from app.services.cost_basis import resolve_cost_basis
 from app.services.polymarket import PolymarketClient
 from app.services.alerts import AlertService
+from app.services.resolution import (
+    compute_close_booking,
+    parse_resolution,
+    should_check_resolution,
+)
 
 logger = logging.getLogger(__name__)
 
-# Module-level miss counter that persists across TrackerService instances
-# within the same process. Keyed by position ID.
-_api_miss_counts: Dict[int, int] = {}
-
-# Number of consecutive misses before auto-closing a sold position
+# Number of consecutive misses before auto-closing a sold position.
+# The counter lives in positions.api_miss_count so it survives a container
+# restart (it used to be a module-level dict, which reset progress to zero).
 AUTO_CLOSE_MISS_THRESHOLD = 3
+
+# Throttle for end_date-triggered Gamma resolution lookups, keyed by market id.
+# A market whose end_date has passed but which UMA hasn't settled (disputes can
+# run for days) would otherwise be re-queried on every 60s poll. In-memory only:
+# a restart just costs one extra lookup per market. Strong signals (redeemable,
+# or the position vanishing from the Data API) bypass the throttle.
+_last_resolution_check: Dict[int, datetime] = {}
+RESOLUTION_RECHECK_SECONDS = 300
+
+# Most resolved positions the resolution sweep will book in a single cycle.
+# A negRisk event can legitimately settle several brackets at once (the Nobel
+# basket was three), but a double-digit batch means something is wrong with the
+# resolution data, not with the portfolio.
+RESOLUTION_SWEEP_MAX_CLOSES = 6
 
 
 class TrackerService:
@@ -122,6 +139,13 @@ class TrackerService:
         now = datetime.now(timezone.utc)
         for position, market in rows:
             try:
+                # _sync_positions may have closed this position earlier in the
+                # same uncommitted transaction (autoflush is off, so the query
+                # above still sees it as open). Re-pricing it would undo the
+                # zeroed current_value and add a phantom snapshot.
+                if position.status != "open":
+                    continue
+
                 token_id = (
                     market.clob_token_id_yes if position.direction == "yes"
                     else market.clob_token_id_no
@@ -197,7 +221,8 @@ class TrackerService:
             position, market = db_positions[token_id]
 
             # Reset miss counter — position is present in API
-            _api_miss_counts.pop(position.id, None)
+            if position.api_miss_count:
+                position.api_miss_count = 0
 
             current_price = pos_data.get("current_price", Decimal("0"))
             value = pos_data.get("value", Decimal("0"))
@@ -255,7 +280,6 @@ class TrackerService:
         if unknown_api_positions:
             await self._auto_discover_positions(unknown_api_positions)
 
-        # Check for positions NOT found in API - these may have resolved
         now = datetime.now(timezone.utc)
         newly_closed: list[tuple[str, str]] = []  # (market_slug, market_title)
         missing_positions = {
@@ -263,115 +287,100 @@ class TrackerService:
             for token_id, (position, market) in db_positions.items()
             if token_id not in found_token_ids
         }
+        # The Data API is behaving if it returned at least a couple of our
+        # positions. Used to gate anything that treats absence as meaningful.
+        api_healthy = len(found_token_ids) >= 2
+
+        # Resolution detection, independent of Data API presence. Resolution
+        # never removes a position from /positions — only redemption does — so
+        # this must be driven by Gamma, not by absence.
+        await self._ingest_resolutions(
+            db_positions=db_positions,
+            api_positions_by_token=api_positions_by_token,
+            missing_token_ids=set(missing_positions) if api_healthy else set(),
+            now=now,
+        )
+        newly_closed.extend(self._sweep_resolved_positions(db_positions, now))
 
         # SAFETY: If ALL (or nearly all) positions disappeared at once, this is
         # almost certainly an API failure, not real position closures.
         # Only proceed with closure logic if at least some positions were matched.
+        skip_missing_logic = False
         if missing_positions and not found_token_ids and len(db_positions) > 1:
             logger.warning(
                 f"ALL {len(db_positions)} positions missing from API response — "
                 f"likely API failure. Skipping position closure logic."
             )
-            return
-
-        if len(missing_positions) > 2 and len(found_token_ids) < len(db_positions) * 0.3:
+            skip_missing_logic = True
+        elif len(missing_positions) > 2 and len(found_token_ids) < len(db_positions) * 0.3:
             logger.warning(
                 f"{len(missing_positions)}/{len(db_positions)} positions missing from API "
                 f"(only {len(found_token_ids)} matched). Possible API issue — "
                 f"skipping closure logic to avoid mass false-closes."
             )
-            return
+            skip_missing_logic = True
 
-        for token_id, (position, market) in missing_positions.items():
-            # Position not in API - check if market has resolved
-            market_resolved = False
-            resolution_outcome = None
+        if not skip_missing_logic:
+            for token_id, (position, market) in missing_positions.items():
+                if position.status != "open":
+                    # Already booked by the resolution sweep this cycle.
+                    continue
 
-            if market.resolved_at is not None:
-                market_resolved = True
-                resolution_outcome = market.resolution_outcome
-            elif market.end_date is not None and market.end_date <= now:
-                # Market end date has passed - likely resolved
-                market_resolved = True
-                resolution_outcome = None
-
-            if market_resolved:
-                logger.info(
-                    f"Marking position {position.id} as closed - market '{market.title}' has resolved"
-                )
-
-                if resolution_outcome is not None:
-                    won = (position.direction == "yes" and resolution_outcome == "yes") or \
-                          (position.direction == "no" and resolution_outcome == "no")
-                    payout = position.shares * Decimal("1.0") if won else Decimal("0")
-                else:
-                    last_price = position.current_price or Decimal("0")
-                    payout = position.shares * last_price
-
-                realized_pnl = payout - position.cost_basis
-
-                if resolution_outcome is not None:
-                    outcome_lower = resolution_outcome.lower() if resolution_outcome else None
-                    direction_lower = position.direction.lower() if position.direction else None
-                    won = outcome_lower == direction_lower
-                    exit_price = Decimal("1.0") if won else Decimal("0")
-                else:
-                    exit_price = position.current_price or Decimal("0")
-
-                position.status = "closed"
-                position.exit_date = market.resolved_at or now
-                position.exit_price = exit_price
-                position.realized_pnl = realized_pnl
-                position.current_value = Decimal("0")
-                position.unrealized_pnl = Decimal("0")
-
-                logger.info(
-                    f"Position {position.id} closed: realized_pnl=${realized_pnl:.2f}, exit_price={exit_price}"
-                )
-                newly_closed.append((market.slug, market.title))
-            else:
-                # Position not in API and market hasn't resolved.
-                # Track consecutive misses and auto-close after threshold,
-                # but only if enough other positions were found (guards against API outage).
-                miss_count = _api_miss_counts.get(position.id, 0) + 1
-                _api_miss_counts[position.id] = miss_count
-
-                if miss_count >= AUTO_CLOSE_MISS_THRESHOLD and len(found_token_ids) >= 2:
-                    # Position has been absent for 3+ consecutive sync cycles
-                    # and the API is returning other positions (not an outage).
-                    logger.info(
-                        f"Auto-closing position {position.id} ('{market.title}'): "
-                        f"absent from API for {miss_count} consecutive sync cycles. "
-                        f"Likely sold externally."
+                # Position not in API - check if market has resolved
+                if market.resolved_at is not None:
+                    self._close_resolved_position(
+                        position,
+                        market,
+                        now,
+                        reason=(
+                            "auto-closed: position absent from API and market resolved "
+                            f"{market.resolution_outcome or 'outcome unknown'}"
+                        ),
                     )
-                    last_price = position.current_price or Decimal("0")
-                    payout = position.shares * last_price
-                    realized_pnl = payout - position.cost_basis
-
-                    position.status = "closed"
-                    position.exit_date = now
-                    position.exit_price = last_price
-                    position.realized_pnl = realized_pnl
-                    position.current_value = Decimal("0")
-                    position.unrealized_pnl = Decimal("0")
-                    position.exit_reasoning = (
-                        f"auto-closed: position absent from API for {miss_count} sync cycles"
-                    )
-
-                    # Clean up miss counter
-                    _api_miss_counts.pop(position.id, None)
-
-                    logger.info(
-                        f"Position {position.id} auto-closed: "
-                        f"realized_pnl=${realized_pnl:.2f}, exit_price={last_price}"
+                    newly_closed.append((market.slug, market.title))
+                elif market.end_date is not None and market.end_date <= now:
+                    # End date passed but Gamma has not confirmed resolution.
+                    # The position is gone from the API, so it must be booked;
+                    # without a resolved outcome the last price is all we have.
+                    self._close_at_last_price(
+                        position,
+                        now,
+                        reason=(
+                            "auto-closed: position absent from API and market end_date "
+                            "passed, but resolution unconfirmed — booked at last price"
+                        ),
                     )
                     newly_closed.append((market.slug, market.title))
                 else:
-                    logger.warning(
-                        f"Position {position.id} ('{market.title}') not found in API but market "
-                        f"still active (miss {miss_count}/{AUTO_CLOSE_MISS_THRESHOLD}). "
-                        f"Will auto-close after {AUTO_CLOSE_MISS_THRESHOLD} consecutive misses."
-                    )
+                    # Position not in API and market hasn't resolved.
+                    # Track consecutive misses and auto-close after threshold,
+                    # but only if enough other positions were found (guards against API outage).
+                    miss_count = (position.api_miss_count or 0) + 1
+                    position.api_miss_count = miss_count
+
+                    if miss_count >= AUTO_CLOSE_MISS_THRESHOLD and api_healthy:
+                        # Position has been absent for 3+ consecutive sync cycles
+                        # and the API is returning other positions (not an outage).
+                        logger.info(
+                            f"Auto-closing position {position.id} ('{market.title}'): "
+                            f"absent from API for {miss_count} consecutive sync cycles. "
+                            f"Likely sold externally."
+                        )
+                        self._close_at_last_price(
+                            position,
+                            now,
+                            reason=(
+                                f"auto-closed: position absent from API for "
+                                f"{miss_count} sync cycles"
+                            ),
+                        )
+                        newly_closed.append((market.slug, market.title))
+                    else:
+                        logger.warning(
+                            f"Position {position.id} ('{market.title}') not found in API but market "
+                            f"still active (miss {miss_count}/{AUTO_CLOSE_MISS_THRESHOLD}). "
+                            f"Will auto-close after {AUTO_CLOSE_MISS_THRESHOLD} consecutive misses."
+                        )
 
         # Clear alerts for any positions that were just closed
         for market_slug, market_title in newly_closed:
@@ -389,6 +398,194 @@ class TrackerService:
                         f"Failed to clear alerts for closed position '{market_title}': {e}",
                         exc_info=True,
                     )
+
+    async def _ingest_resolutions(
+        self,
+        db_positions: Dict[str, tuple],
+        api_positions_by_token: Dict[str, Dict],
+        missing_token_ids: set,
+        now: datetime,
+    ) -> int:
+        """Populate markets.resolved_at / resolution_outcome from Gamma.
+
+        Only markets that could plausibly have settled are checked (see
+        should_check_resolution), so a portfolio of live markets costs zero
+        Gamma calls per cycle. Returns the number of lookups performed.
+        """
+        checked = 0
+        seen_markets: set = set()
+
+        for token_id, (position, market) in db_positions.items():
+            pos_data = api_positions_by_token.get(token_id) or {}
+            redeemable = bool(pos_data.get("redeemable"))
+            missing = token_id in missing_token_ids
+            if not should_check_resolution(
+                resolved_at=market.resolved_at,
+                end_date=market.end_date,
+                now=now,
+                redeemable=redeemable,
+                missing_from_api=missing,
+            ):
+                continue
+
+            # Both sides of the same market share one Market row; one call does.
+            market_key = market.id if market.id is not None else id(market)
+            if market_key in seen_markets:
+                continue
+            seen_markets.add(market_key)
+
+            last_checked = _last_resolution_check.get(market_key)
+            if (
+                not (redeemable or missing)
+                and last_checked is not None
+                and (now - last_checked).total_seconds() < RESOLUTION_RECHECK_SECONDS
+            ):
+                continue
+            _last_resolution_check[market_key] = now
+
+            try:
+                raw = await self.client.get_market_resolution(token_id)
+            except Exception as e:
+                logger.warning(
+                    f"Resolution lookup failed for market '{market.title}' "
+                    f"(position {position.id}): {e}"
+                )
+                continue
+
+            checked += 1
+            state = parse_resolution(raw)
+            if not state.resolved:
+                logger.debug(
+                    f"Market '{market.title}' not resolved yet "
+                    f"(position {position.id} still open)"
+                )
+                continue
+
+            market.resolved_at = state.resolved_at or now
+            market.resolution_outcome = state.outcome
+            if state.outcome is None:
+                logger.warning(
+                    f"Market '{market.title}' is resolved but the winning outcome "
+                    f"could not be determined from Gamma outcomePrices — position "
+                    f"will be booked at its last price."
+                )
+            else:
+                logger.info(
+                    f"Market '{market.title}' resolved {state.outcome.upper()} at "
+                    f"{market.resolved_at.isoformat()} (from Gamma)"
+                )
+
+        return checked
+
+    def _sweep_resolved_positions(
+        self, db_positions: Dict[str, tuple], now: datetime
+    ) -> List[tuple]:
+        """Close every open position whose market has resolved.
+
+        This is the fix for the structural bug: closure is driven by resolution
+        state, not by the position disappearing from the Data API (which only
+        happens on redemption, and never happens for worthless positions nobody
+        bothers to redeem). Returns (market_slug, market_title) per close.
+        """
+        candidates = [
+            (position, market)
+            for position, market in db_positions.values()
+            if position.status == "open" and market.resolved_at is not None
+        ]
+        if not candidates:
+            return []
+
+        if len(candidates) > RESOLUTION_SWEEP_MAX_CLOSES:
+            logger.error(
+                "Resolution sweep found %d resolved open positions (cap %d) — refusing "
+                "to mass-close in one cycle. Review manually: %s",
+                len(candidates),
+                RESOLUTION_SWEEP_MAX_CLOSES,
+                [(p.id, m.slug) for p, m in candidates],
+            )
+            return []
+
+        closed = []
+        for position, market in candidates:
+            resolved_at = market.resolved_at.isoformat() if market.resolved_at else "unknown"
+            self._close_resolved_position(
+                position,
+                market,
+                now,
+                reason=(
+                    f"auto-closed: market resolved "
+                    f"{market.resolution_outcome or 'outcome unknown'} at {resolved_at}"
+                ),
+            )
+            closed.append((market.slug, market.title))
+        return closed
+
+    def _close_resolved_position(
+        self, position: Position, market: Market, now: datetime, reason: str
+    ) -> Decimal:
+        """Book a position against its market's resolution outcome.
+
+        With a known outcome the payout is exactly $1 or $0 per share — not the
+        last CLOB midpoint, which froze the July Fed winner at 0.9995.
+        """
+        exit_price, realized_pnl = compute_close_booking(
+            direction=position.direction,
+            shares=position.shares,
+            cost_basis=position.cost_basis,
+            resolution_outcome=market.resolution_outcome,
+            last_price=position.current_price,
+        )
+        self._apply_close(
+            position,
+            exit_date=market.resolved_at or now,
+            exit_price=exit_price,
+            realized_pnl=realized_pnl,
+            reason=reason,
+        )
+        return realized_pnl
+
+    def _close_at_last_price(
+        self, position: Position, now: datetime, reason: str
+    ) -> Decimal:
+        """Book a position at its last known price (outcome unknown)."""
+        exit_price, realized_pnl = compute_close_booking(
+            direction=position.direction,
+            shares=position.shares,
+            cost_basis=position.cost_basis,
+            resolution_outcome=None,
+            last_price=position.current_price,
+        )
+        self._apply_close(
+            position,
+            exit_date=now,
+            exit_price=exit_price,
+            realized_pnl=realized_pnl,
+            reason=reason,
+        )
+        return realized_pnl
+
+    def _apply_close(
+        self,
+        position: Position,
+        exit_date: datetime,
+        exit_price: Decimal,
+        realized_pnl: Decimal,
+        reason: str,
+    ) -> None:
+        position.status = "closed"
+        position.exit_date = exit_date
+        position.exit_price = exit_price
+        position.realized_pnl = realized_pnl
+        position.current_value = Decimal("0")
+        position.unrealized_pnl = Decimal("0")
+        position.exit_reasoning = reason
+        position.api_miss_count = 0
+
+        logger.info(
+            f"Position {position.id} closed: exit_price={exit_price}, "
+            f"realized_pnl=${realized_pnl:.2f}, exit_date={exit_date.isoformat()} "
+            f"— {reason}"
+        )
 
     async def _auto_discover_positions(self, unknown_positions: List[Dict]) -> None:
         """Auto-discover and create DB records for positions found in API but not in DB.
@@ -476,6 +673,20 @@ class TrackerService:
                         select(Market).where(Market.slug == slug)
                     )
                     existing_market = result.scalar_one_or_none()
+
+                if existing_market is not None and existing_market.resolved_at is not None:
+                    # A settled position keeps appearing in the Data API until
+                    # it is redeemed, and worthless ones never are. Now that
+                    # resolution (not absence) closes positions, re-discovering
+                    # this token would re-open the position on every cycle and
+                    # close it again on the next sweep.
+                    logger.debug(
+                        f"Auto-discover: skipping '{title}' {direction} — market resolved "
+                        f"{existing_market.resolution_outcome or 'outcome unknown'} at "
+                        f"{existing_market.resolved_at.isoformat()}; position already "
+                        f"booked, awaiting redemption."
+                    )
+                    continue
 
                 if existing_market:
                     market = existing_market
