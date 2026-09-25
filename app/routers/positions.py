@@ -20,6 +20,14 @@ from app.services.tracker import TrackerService
 router = APIRouter(prefix="/positions", tags=["positions"])
 
 
+def _bump_tag_group(groups: Dict[str, dict], tag, pnl: Decimal, won: bool) -> None:
+    """Accumulate one closed position into a per-tag bucket (pm-rfz.5)."""
+    g = groups.setdefault(tag or "untagged", {"count": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0})
+    g["count"] += 1
+    g["wins" if won else "losses"] += 1
+    g["realized_pnl"] = round(g["realized_pnl"] + float(pnl), 2)
+
+
 @router.get("", response_model=List[PositionResponse])
 async def list_positions(
     status: str = Query(default="open", description="Filter by status: open, closed, all"),
@@ -54,6 +62,8 @@ async def list_positions(
             thesis_status=position.thesis_status,
             entry_reasoning=position.entry_reasoning,
             exit_reasoning=position.exit_reasoning,
+            strategy_tag=position.strategy_tag,
+            pipeline_tag=position.pipeline_tag,
             created_at=position.created_at,
             updated_at=position.updated_at,
         )
@@ -146,6 +156,10 @@ async def get_closed_positions_summary(
     total_realized_pnl = Decimal("0")
     win_pnls = []
     loss_pnls = []
+    # pm-rfz.5: realized P&L split by trade shape and by research depth.
+    # Untagged rows land under "untagged" so the split always sums to the total.
+    by_strategy_tag: Dict[str, dict] = {}
+    by_pipeline_tag: Dict[str, dict] = {}
 
     for position, market in rows:
         pnl = position.realized_pnl or Decimal("0")
@@ -170,7 +184,11 @@ async def get_closed_positions_summary(
             "entry_price": float(position.entry_price) if position.entry_price else None,
             "exit_price": float(position.exit_price) if position.exit_price else None,
             "shares": float(position.shares) if position.shares else None,
+            "strategy_tag": position.strategy_tag,
+            "pipeline_tag": position.pipeline_tag,
         })
+        _bump_tag_group(by_strategy_tag, position.strategy_tag, pnl, won)
+        _bump_tag_group(by_pipeline_tag, position.pipeline_tag, pnl, won)
 
     total_closed = wins + losses
     win_rate = round((wins / total_closed) * 100, 1) if total_closed > 0 else 0.0
@@ -185,6 +203,8 @@ async def get_closed_positions_summary(
         "total_realized_pnl": float(total_realized_pnl),
         "avg_win": avg_win,
         "avg_loss": avg_loss,
+        "by_strategy_tag": by_strategy_tag,
+        "by_pipeline_tag": by_pipeline_tag,
         "positions": positions_list,
     }
 
@@ -285,6 +305,8 @@ async def get_position_detail(
         "status": position.status,
         "entry_reasoning": position.entry_reasoning,
         "exit_reasoning": position.exit_reasoning,
+        "strategy_tag": position.strategy_tag,
+        "pipeline_tag": position.pipeline_tag,
         "exit_price": float(position.exit_price) if position.exit_price else None,
         "exit_date": position.exit_date.strftime("%Y-%m-%d") if position.exit_date else None,
         "realized_pnl": float(position.realized_pnl) if position.realized_pnl else None,
@@ -326,6 +348,8 @@ async def get_position(position_id: int, db: AsyncSession = Depends(get_db)):
         thesis_status=position.thesis_status,
         entry_reasoning=position.entry_reasoning,
         exit_reasoning=position.exit_reasoning,
+        strategy_tag=position.strategy_tag,
+        pipeline_tag=position.pipeline_tag,
         created_at=position.created_at,
         updated_at=position.updated_at,
     )
@@ -409,6 +433,8 @@ async def create_position(
         thesis_status=position.thesis_status,
         entry_reasoning=position.entry_reasoning,
         exit_reasoning=position.exit_reasoning,
+        strategy_tag=position.strategy_tag,
+        pipeline_tag=position.pipeline_tag,
         created_at=position.created_at,
         updated_at=position.updated_at,
     )
@@ -450,6 +476,10 @@ async def update_position(
         position.exit_reasoning = update_data.exit_reasoning
     if update_data.realized_pnl is not None:
         position.realized_pnl = update_data.realized_pnl
+    if update_data.strategy_tag is not None:
+        position.strategy_tag = update_data.strategy_tag
+    if update_data.pipeline_tag is not None:
+        position.pipeline_tag = update_data.pipeline_tag
 
     # Recalculate derived values
     if position.current_price and position.shares:
@@ -478,6 +508,8 @@ async def update_position(
         thesis_status=position.thesis_status,
         entry_reasoning=position.entry_reasoning,
         exit_reasoning=position.exit_reasoning,
+        strategy_tag=position.strategy_tag,
+        pipeline_tag=position.pipeline_tag,
         created_at=position.created_at,
         updated_at=position.updated_at,
     )

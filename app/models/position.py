@@ -8,6 +8,24 @@ position_direction = ENUM('yes', 'no', name='position_direction', create_type=Fa
 position_status = ENUM('open', 'closed', 'pending', name='position_status', create_type=False)
 thesis_status_enum = ENUM('intact', 'strengthened', 'weakened', 'degraded', 'invalidated', name='thesis_status', create_type=False)
 
+# Attribution tags (beads pm-rfz.5). Plain VARCHAR columns, not PG enums, so the
+# vocabulary can grow without a migration. Kept in sync by tests with the copy
+# in scripts/backfill_attribution_tags.py and the desk's post_order_alerts.py.
+STRATEGY_TAGS = frozenset({
+    "value-midband",       # 35-85c entry on a forecast/judgment thesis
+    "carry-definitional",  # >=85c entry whose thesis is a resolution-rule reading
+    "carry-forecast",      # >=85c entry on a forecast thesis
+    "fast-track-data",     # 35-85c entry on a Grade A/B data-resolved market via the Fast Track
+    "longshot",            # <35c entry (blocked since Sep 2026; historical rows only)
+    "override",            # user-directed entry outside the pipeline's recommendation
+})
+PIPELINE_TAGS = frozenset({
+    "full",   # full 7-9 agent pipeline
+    "fast",   # Fast Track (4 agents)
+    "gate",   # gate-check only
+    "none",   # no analysis folder
+})
+
 
 class Recommendation(Base):
     """Stub model to register the recommendations table in ORM metadata.
@@ -50,6 +68,12 @@ class Position(Base):
     # doesn't reset progress toward AUTO_CLOSE_MISS_THRESHOLD. Added by the
     # idempotent ALTER in app/main.py's lifespan.
     api_miss_count = Column(Integer, nullable=False, server_default="0", default=0)
+    # Attribution (pm-rfz.5): trade shape / research depth. Nullable — set by
+    # the desk's post_order_alerts.py after a BUY, or by
+    # scripts/backfill_attribution_tags.py. Ensured by the same idempotent
+    # ALTER pattern as api_miss_count in app/main.py's lifespan.
+    strategy_tag = Column(String(32))
+    pipeline_tag = Column(String(16))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

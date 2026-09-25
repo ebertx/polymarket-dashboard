@@ -52,6 +52,45 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # positions.strategy_tag / positions.pipeline_tag (pm-rfz.5 attribution).
+    # Nullable, but declared on the ORM model, so — exactly like api_miss_count
+    # above — every position query fails until they exist. One DO block per
+    # column so an already-present column can't mask the other's failure.
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                DO $$ BEGIN
+                    ALTER TABLE positions
+                        ADD COLUMN strategy_tag VARCHAR(32);
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$
+            """))
+        logger.info("Schema ensured: positions.strategy_tag")
+    except Exception as e:
+        logger.error(
+            f"FATAL-ISH: could not add positions.strategy_tag ({e}). "
+            f"Position syncing will fail until this column exists.",
+            exc_info=True,
+        )
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                DO $$ BEGIN
+                    ALTER TABLE positions
+                        ADD COLUMN pipeline_tag VARCHAR(16);
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$
+            """))
+        logger.info("Schema ensured: positions.pipeline_tag")
+    except Exception as e:
+        logger.error(
+            f"FATAL-ISH: could not add positions.pipeline_tag ({e}). "
+            f"Position syncing will fail until this column exists.",
+            exc_info=True,
+        )
+
     # Ensure alert tables exist (idempotent)
     try:
         async with engine.begin() as conn:
