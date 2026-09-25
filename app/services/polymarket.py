@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import logging
 from decimal import Decimal
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 from py_clob_client.client import ClobClient
 from py_clob_client.constants import POLYGON
@@ -188,6 +188,67 @@ class PolymarketClient:
             "total_position_value": total_value,
             "positions": processed_positions,
         }
+
+    async def get_recent_sell_fills(
+        self, token_id: str, since_ts: int
+    ) -> List[Tuple[Decimal, Decimal]]:
+        """Return our recent SELL fills for ``token_id`` from the activity feed.
+
+        Used by the tracker to price a partial sell: the Data API /positions
+        payload only reveals that the share count shrank, not what the sold
+        slice fetched. The /activity feed has the actual fills.
+
+        Filters to ``asset == token_id``, ``proxyWallet`` == our wallet
+        (case-insensitive — same foreign-wallet guard as get_wallet_positions)
+        and ``timestamp >= since_ts`` (unix seconds). Returns a list of
+        ``(size, price)`` Decimals, most recent first. Returns ``[]`` on any
+        request failure or malformed payload so the caller can fall back.
+        """
+        url = f"{DATA_API_BASE}/activity"
+        params = {
+            "user": self.wallet_address,
+            "type": "TRADE",
+            "side": "SELL",
+            "limit": 100,
+        }
+
+        try:
+            data = await self._request(url, params)
+        except Exception as e:
+            logger.warning(f"Activity feed lookup failed for token {token_id}: {e}")
+            return []
+
+        if not isinstance(data, list):
+            logger.warning(
+                f"Activity feed returned non-list payload for token {token_id}: "
+                f"{type(data).__name__}"
+            )
+            return []
+
+        fills: List[Tuple[int, Decimal, Decimal]] = []
+        for row in data:
+            try:
+                if row.get("asset") != token_id:
+                    continue
+                if str(row.get("side", "")).upper() != "SELL":
+                    continue
+                owner = str(row.get("proxyWallet") or "").lower()
+                if owner != self.wallet_address:
+                    continue
+                ts = int(row.get("timestamp", 0))
+                if ts < since_ts:
+                    continue
+                size = Decimal(str(row.get("size", 0)))
+                price = Decimal(str(row.get("price", 0)))
+                if size <= 0 or price <= 0:
+                    continue
+                fills.append((ts, size, price))
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Skipping malformed activity row {row!r}: {e}")
+                continue
+
+        fills.sort(key=lambda f: f[0], reverse=True)
+        return [(size, price) for _, size, price in fills]
 
     async def get_market_price(self, token_id: str) -> Optional[Decimal]:
         """Fetch current midpoint price for a token from CLOB API."""

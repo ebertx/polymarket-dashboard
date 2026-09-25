@@ -1,7 +1,7 @@
 import json
 import logging
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 from sqlalchemy import func, select
@@ -37,6 +37,12 @@ RESOLUTION_RECHECK_SECONDS = 300
 # basket was three), but a double-digit batch means something is wrong with the
 # resolution data, not with the portfolio.
 RESOLUTION_SWEEP_MAX_CLOSES = 6
+
+# A partial sell is priced from the activity feed only if the recent SELL
+# fills cover the sold amount to within this fraction (Data API sizes are
+# rounded, so exact equality is too strict). Otherwise the slice is booked at
+# the Data API midpoint with a WARNING.
+PARTIAL_SELL_COVERAGE_TOLERANCE = Decimal("0.005")
 
 
 class TrackerService:
@@ -230,6 +236,7 @@ class TrackerService:
 
             # Sync share count if API reports a different size (add or sell).
             old_shares = position.shares
+            old_entry_price = position.entry_price
             if api_size is not None:
                 api_shares = Decimal(str(api_size))
                 if api_shares != position.shares and api_shares > 0:
@@ -239,6 +246,18 @@ class TrackerService:
                         f"Position {position.id} shares updated: {old_shares} -> "
                         f"{api_shares} ({'added' if delta > 0 else 'sold'} {abs(delta)})"
                     )
+                    if delta < 0:
+                        # Partial sell: book realized P&L for the sold slice
+                        # NOW. The later close only books the remaining
+                        # shares, so without this every trim / profit-take
+                        # vanished from realized P&L (pm-rfz.2).
+                        await self._book_partial_sell(
+                            position,
+                            token_id=token_id,
+                            sold=-delta,
+                            old_entry_price=old_entry_price,
+                            midpoint=current_price,
+                        )
 
             # Re-derive the cost basis from the Data API's avg_price, which is
             # authoritative for the currently-open shares. This self-heals the
@@ -253,7 +272,7 @@ class TrackerService:
                 api_avg=api_avg,
                 shares=position.shares,
                 old_shares=old_shares,
-                old_entry_price=position.entry_price,
+                old_entry_price=old_entry_price,
                 old_cost_basis=position.cost_basis,
             )
             if new_entry_price is not None:
@@ -398,6 +417,87 @@ class TrackerService:
                         f"Failed to clear alerts for closed position '{market_title}': {e}",
                         exc_info=True,
                     )
+
+    async def _resolve_sell_fill_price(
+        self,
+        position: Position,
+        token_id: str,
+        sold: Decimal,
+        midpoint: Decimal,
+    ) -> tuple[Decimal, str]:
+        """Price a sold slice from the activity feed, else the Data API midpoint.
+
+        Takes the most recent SELL fills whose cumulative size covers ``sold``
+        (within PARTIAL_SELL_COVERAGE_TOLERANCE) and returns their
+        size-weighted average price. The last fill is clipped to the remainder
+        so an oversized fill (e.g. two trims settling in one cycle) does not
+        skew the average. Returns ``(price, source)`` where source is
+        ``"fills"`` or ``"midpoint"``.
+        """
+        if position.updated_at is not None:
+            since_dt = position.updated_at - timedelta(minutes=15)
+        else:
+            since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+        since_ts = int(since_dt.timestamp())
+
+        try:
+            fills = await self.client.get_recent_sell_fills(token_id, since_ts)
+        except Exception as e:
+            logger.warning(
+                f"Position {position.id}: activity feed lookup failed ({e}); "
+                f"sold slice will be booked at the midpoint"
+            )
+            fills = []
+
+        covered = Decimal("0")
+        notional = Decimal("0")
+        for size, price in fills or []:
+            remaining = sold - covered
+            if remaining <= 0:
+                break
+            take = min(Decimal(str(size)), remaining)
+            covered += take
+            notional += take * Decimal(str(price))
+
+        min_coverage = sold * (Decimal("1") - PARTIAL_SELL_COVERAGE_TOLERANCE)
+        if covered > 0 and covered >= min_coverage:
+            return notional / covered, "fills"
+
+        logger.warning(
+            f"Position {position.id}: activity feed covered {covered} of {sold} "
+            f"sold shares (since_ts={since_ts}); booking the slice at the Data "
+            f"API midpoint {midpoint} instead of a fill price"
+        )
+        return midpoint, "midpoint"
+
+    async def _book_partial_sell(
+        self,
+        position: Position,
+        token_id: str,
+        sold: Decimal,
+        old_entry_price: Optional[Decimal],
+        midpoint: Decimal,
+    ) -> Decimal:
+        """Accumulate realized P&L for a partial sell into ``position.realized_pnl``.
+
+        Avg-cost accounting: the Data API's avgPrice of the remaining shares is
+        unchanged by a sell, so the cost of the sold slice is the pre-sell
+        entry price. Does not touch cost_basis — resolve_cost_basis re-derives
+        it for the remaining shares in the caller as before.
+        """
+        entry = old_entry_price if old_entry_price is not None else Decimal("0")
+        fill_price, source = await self._resolve_sell_fill_price(
+            position, token_id=token_id, sold=sold, midpoint=midpoint
+        )
+        slice_realized = sold * (fill_price - entry)
+        position.realized_pnl = (position.realized_pnl or Decimal("0")) + slice_realized
+
+        logger.info(
+            f"Position {position.id} partial sell booked: sold {sold} @ "
+            f"{fill_price} ({source}) vs entry {entry} -> slice realized "
+            f"${slice_realized:.2f}, cumulative realized ${position.realized_pnl:.2f}"
+        )
+        return slice_realized
 
     async def _ingest_resolutions(
         self,
@@ -572,10 +672,18 @@ class TrackerService:
         realized_pnl: Decimal,
         reason: str,
     ) -> None:
+        """Mark a position closed.
+
+        ``realized_pnl`` is the close-only booking on the shares still open
+        (compute_close_booking on the current cost_basis). Any realized P&L
+        already accumulated by partial sells is ADDED, not overwritten — the
+        overwrite is what erased every 2026 profit-take (pm-rfz.2).
+        """
+        prior_realized = position.realized_pnl or Decimal("0")
         position.status = "closed"
         position.exit_date = exit_date
         position.exit_price = exit_price
-        position.realized_pnl = realized_pnl
+        position.realized_pnl = prior_realized + realized_pnl
         position.current_value = Decimal("0")
         position.unrealized_pnl = Decimal("0")
         position.exit_reasoning = reason
@@ -583,8 +691,9 @@ class TrackerService:
 
         logger.info(
             f"Position {position.id} closed: exit_price={exit_price}, "
-            f"realized_pnl=${realized_pnl:.2f}, exit_date={exit_date.isoformat()} "
-            f"— {reason}"
+            f"close_pnl=${realized_pnl:.2f}, prior_partial=${prior_realized:.2f}, "
+            f"realized_pnl=${position.realized_pnl:.2f}, "
+            f"exit_date={exit_date.isoformat()} — {reason}"
         )
 
     async def _auto_discover_positions(self, unknown_positions: List[Dict]) -> None:
