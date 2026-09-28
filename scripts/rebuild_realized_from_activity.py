@@ -205,6 +205,8 @@ class AssetLedger:
         self.total_bought += size
         self.total_bought_cost += usdc
         self.buys.append(Fill(ts, size, price, usdc))
+        if self.status == "closed" and not self.redeemed:
+            self.status = "open"                  # re-entry after a full sell-out
         if self.first_buy_ts is None or ts < self.first_buy_ts:
             self.first_buy_ts = ts
 

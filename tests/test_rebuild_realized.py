@@ -290,6 +290,24 @@ def test_open_remainder_reported_as_unrealized():
     assert led.unrealized() == D("0.9")        # 6 * (0.45 - 0.3)
 
 
+def test_rebuy_after_full_exit_reopens_position():
+    # Same token fully sold, then bought again later (NYC Parcl Jul -> Sep 2026):
+    # the re-entry must be open with unrealized P&L, not stuck at "closed".
+    rows = [
+        trade("BUY", 31, 0.158, T_JAN),
+        trade("SELL", 31, 0.061, T_FEB),
+        trade("BUY", 10, 0.795, T_MAR),
+    ]
+    resolver = _fake_resolver({COND_A: {"resolved": False, "outcome": None, "resolved_at": None,
+                                        "prices": [D("0.9185"), D("0.0815")]}})
+    led = build_ledgers(rows, resolver=resolver, now=NOW).assets[TOK_A_YES]
+    assert led.status == "open"
+    assert led.shares == D("10")
+    assert led.avg_cost == D("0.795")
+    assert led.mark_price == D("0.9185")
+    assert led.unrealized() == D("1.235")      # 10 * (0.9185 - 0.795)
+
+
 def test_open_remainder_without_resolver_stays_open_and_no_gamma_call():
     rows = [trade("BUY", 10, 0.3, T_JAN)]
     led = build_ledgers(rows, resolver=None, now=NOW).assets[TOK_A_YES]
