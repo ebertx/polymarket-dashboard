@@ -499,6 +499,32 @@ def test_api_outage_does_not_close_anything():
     assert all(p.api_miss_count in (None, 0) for p, _ in pairs)
 
 
+def test_gamma_miss_for_unknown_token_warns_once_per_process():
+    # A worthless still-redeemable token (Truth-Social bracket, pid 101) made
+    # every 60s poll log the same warning. Warn once, then stay at debug.
+    import logging
+    tracker_module._gamma_miss_warned.clear()
+    tracker = make_tracker([], FakeClient(metadata={}))
+    records = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Grab(level=logging.DEBUG)
+    tracker_module.logger.addHandler(handler)
+    old_level = tracker_module.logger.level
+    tracker_module.logger.setLevel(logging.DEBUG)
+    try:
+        for _ in range(3):
+            asyncio.run(tracker._auto_discover_positions([{"token_id": "tok-dead"}]))
+    finally:
+        tracker_module.logger.removeHandler(handler)
+        tracker_module.logger.setLevel(old_level)
+    misses = [r for r in records if "returned no data" in r.getMessage()]
+    assert [r.levelno for r in misses] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(list(globals().items())):
         if _name.startswith("test_") and callable(_fn):

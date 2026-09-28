@@ -30,6 +30,9 @@ AUTO_CLOSE_MISS_THRESHOLD = 3
 # a restart just costs one extra lookup per market. Strong signals (redeemable,
 # or the position vanishing from the Data API) bypass the throttle.
 _last_resolution_check: Dict[int, datetime] = {}
+# Tokens whose Gamma lookup already missed this process; later misses log at
+# debug (a worthless still-redeemable token otherwise warns every poll).
+_gamma_miss_warned: set = set()
 RESOLUTION_RECHECK_SECONDS = 300
 
 # Most resolved positions the resolution sweep will book in a single cycle.
@@ -715,9 +718,9 @@ class TrackerService:
                 # Look up market metadata from Gamma API
                 market_data = await self.client.lookup_market_by_token_id(token_id)
                 if not market_data:
-                    logger.warning(
-                        f"Auto-discover: Gamma API returned no data for token {token_id}. Skipping."
-                    )
+                    log = logger.debug if token_id in _gamma_miss_warned else logger.warning
+                    _gamma_miss_warned.add(token_id)
+                    log(f"Auto-discover: Gamma API returned no data for token {token_id}. Skipping.")
                     continue
 
                 # Parse market metadata
