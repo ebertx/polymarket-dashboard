@@ -1328,7 +1328,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="write corrections to the DB (one transaction)")
     p.add_argument("--yes", action="store_true", help="skip the interactive confirmation for --apply")
     p.add_argument("--json", dest="json_path", help="dump the per-asset ledger + join to this path")
-    p.add_argument("--start-capital", type=Decimal, default=Decimal("229.13"),
+    p.add_argument("--start-capital", type=Decimal, default=Decimal("231.00"),
                    help="starting capital on Jan 1 of --year for the equity identity")
     p.add_argument("--no-gamma", action="store_true",
                    help="no Polymarket lookups: skip Gamma resolution of unredeemed remainders and CLOB year-start marks")

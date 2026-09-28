@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     alerts_enabled: bool = True
     ntfy_topic: str = ""  # e.g. "polymarket-alerts-xyz" — leave empty to disable notifications
     ntfy_server: str = "https://ntfy.sh"
-    starting_capital: float = 229.13  # Jan 1, 2026 — used for portfolio drawdown calc
+    starting_capital: float = 231.00  # Jan 1, 2026 (fills-derived; was 229.13) — used for portfolio drawdown calc
     dashboard_url: str = "https://polymarket.ebertx.com"  # used for ntfy action buttons
 
     # Docs viewer (/docs) — serves polymarket-team markdown from GitHub

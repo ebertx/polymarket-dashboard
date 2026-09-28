@@ -22,7 +22,7 @@ services:
       - ALERTS_ENABLED=${ALERTS_ENABLED:-true}
       - NTFY_TOPIC=${NTFY_TOPIC:-}
       - NTFY_SERVER=${NTFY_SERVER:-https://ntfy.sh}
-      - STARTING_CAPITAL=${STARTING_CAPITAL:-229.13}
+      - STARTING_CAPITAL=${STARTING_CAPITAL:-231.00}
     labels:
       # Traefik labels for reverse proxy
       - "traefik.enable=true"
