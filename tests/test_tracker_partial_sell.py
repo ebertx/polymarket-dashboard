@@ -304,6 +304,7 @@ def test_absent_from_api_auto_close_adds_to_prior_partial_realized():
              + [api_pos(p, m) for p, m in fillers])
     assert pos.realized_pnl == Decimal("7.56")
 
+    client.fills = {}            # the closing sell is not in the feed -> last price fallback
     for _ in range(AUTO_CLOSE_MISS_THRESHOLD):
         run_sync(tracker, [api_pos(p, m) for p, m in fillers])
 
@@ -311,6 +312,24 @@ def test_absent_from_api_auto_close_adds_to_prior_partial_realized():
     assert pos.exit_price == Decimal("0.70")
     # close booking: 20 * 0.70 - 7.20 = 6.80; plus 7.56 prior
     assert pos.realized_pnl == Decimal("14.36")
+
+
+def test_full_sell_out_books_close_at_fill_price_not_mark():
+    """Oct 27 2026 (pm-6mj): 10y dip<4.95 NO bought 6 @ 0.71, maker SELL 6 @ 0.58 filled; the
+    row was auto-closed at the 0.65 mark (realized -0.36) instead of the fill (-0.78)."""
+    pos, mkt = make_pair(15, shares="6", entry="0.71", current_price="0.65", end_date=None)
+    fillers = filler_pairs()
+    tok = token_of(pos, mkt)
+    client = FakeClient(fills={tok: [("6", "0.58")]})
+    tracker = make_tracker([(pos, mkt)] + fillers, client)
+
+    for _ in range(AUTO_CLOSE_MISS_THRESHOLD):
+        run_sync(tracker, [api_pos(p, m) for p, m in fillers])
+
+    assert pos.status == "closed"
+    assert pos.exit_price == Decimal("0.58")
+    assert pos.realized_pnl == Decimal("-0.78")
+    assert "fill" in (pos.exit_reasoning or "")
 
 
 def test_close_without_prior_partial_is_unchanged():

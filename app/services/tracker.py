@@ -388,8 +388,11 @@ class TrackerService:
                             f"absent from API for {miss_count} consecutive sync cycles. "
                             f"Likely sold externally."
                         )
-                        self._close_at_last_price(
+                        # Sold out (pm-6mj): price the close from our actual SELL
+                        # fills like a partial sell; the mark is only a fallback.
+                        await self._close_at_fill_price(
                             position,
+                            token_id,
                             now,
                             reason=(
                                 f"auto-closed: position absent from API for "
@@ -427,6 +430,7 @@ class TrackerService:
         token_id: str,
         sold: Decimal,
         midpoint: Decimal,
+        since_ts: int | None = None,
     ) -> tuple[Decimal, str]:
         """Price a sold slice from the activity feed, else the Data API midpoint.
 
@@ -437,11 +441,12 @@ class TrackerService:
         skew the average. Returns ``(price, source)`` where source is
         ``"fills"`` or ``"midpoint"``.
         """
-        if position.updated_at is not None:
-            since_dt = position.updated_at - timedelta(minutes=15)
-        else:
-            since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
-        since_ts = int(since_dt.timestamp())
+        if since_ts is None:
+            if position.updated_at is not None:
+                since_dt = position.updated_at - timedelta(minutes=15)
+            else:
+                since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+            since_ts = int(since_dt.timestamp())
 
         try:
             fills = await self.client.get_recent_sell_fills(token_id, since_ts)
@@ -644,6 +649,45 @@ class TrackerService:
             exit_price=exit_price,
             realized_pnl=realized_pnl,
             reason=reason,
+        )
+        return realized_pnl
+
+    async def _close_at_fill_price(
+        self, position: Position, token_id: str, now: datetime, reason: str
+    ) -> Decimal:
+        """Book a sold-out position at the size-weighted price of our SELL fills.
+
+        A full sell-out used to be booked at the last mark: Oct 27 2026 a 6-share
+        NO bought at 0.71 and sold at 0.58 was closed at the 0.65 mark (pm-6mj).
+        The fill search looks back to the position's entry (at most 7 days), since
+        the sell happened before the AUTO_CLOSE_MISS_THRESHOLD misses that led here.
+        Falls back to the mark (with the existing WARNING) when the feed does not
+        cover the shares.
+        """
+        floor = now - timedelta(days=7)
+        entry = position.entry_date
+        if entry is not None and entry.tzinfo is None:
+            entry = entry.replace(tzinfo=timezone.utc)
+        since_dt = max(entry, floor) if entry is not None else floor
+        mark = position.current_price if position.current_price is not None else Decimal("0")
+        fill_price, source = await self._resolve_sell_fill_price(
+            position, token_id, position.shares, mark, since_ts=int(since_dt.timestamp())
+        )
+        if source != "fills":
+            return self._close_at_last_price(position, now, reason=reason)
+        exit_price, realized_pnl = compute_close_booking(
+            direction=position.direction,
+            shares=position.shares,
+            cost_basis=position.cost_basis,
+            resolution_outcome=None,
+            last_price=fill_price,
+        )
+        self._apply_close(
+            position,
+            exit_date=now,
+            exit_price=exit_price,
+            realized_pnl=realized_pnl,
+            reason=f"{reason} — booked at sell fill {fill_price:.4f}",
         )
         return realized_pnl
 
