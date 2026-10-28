@@ -19,6 +19,10 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD_HASH=${AUTH_PASSWORD_HASH}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      # /docs viewer: signed Telegram links (shared with Kryten doc_link.py) + read-only GitHub PAT.
+      # The environment list is an allowlist — a var only in .env never reaches the container.
+      - DOCS_LINK_SECRET=${DOCS_LINK_SECRET}
+      - GITHUB_DOCS_TOKEN=${GITHUB_DOCS_TOKEN:-}
       - ALERTS_ENABLED=${ALERTS_ENABLED:-true}
       - NTFY_TOPIC=${NTFY_TOPIC:-}
       - NTFY_SERVER=${NTFY_SERVER:-https://ntfy.sh}
