@@ -72,3 +72,32 @@ def test_get_wallet_positions_follows_cursor():
 
     client._request = fake_request
     assert sorted(r["asset"] for r in asyncio.run(client.get_wallet_positions())) == ["a", "b"]
+
+
+def test_request_retries_429_then_returns(monkeypatch):
+    from app.services.polymarket import PolymarketClient
+    import app.services.polymarket as pm
+
+    class Resp:
+        def __init__(self, status, body=None, headers=None):
+            self.status, self._body, self.headers = status, body, headers or {}
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def raise_for_status(self):
+            if self.status >= 400: raise pm.aiohttp.ClientResponseError(None, (), status=self.status)
+        async def json(self): return self._body
+
+    seq = [Resp(429, headers={"Retry-After": "0"}), Resp(200, {"data": [], "pagination": {}})]
+
+    class Sess:
+        closed = False
+        def get(self, url, params=None, timeout=None): return seq.pop(0)
+
+    sleeps = []
+    async def fake_sleep(s): sleeps.append(s)
+    monkeypatch.setattr(pm.asyncio, "sleep", fake_sleep)
+    c = PolymarketClient(WALLET)
+    async def gs(): return Sess()
+    c._get_session = gs
+    assert asyncio.run(c._request("https://x/v2/positions")) == {"data": [], "pagination": {}}
+    assert sleeps == [0.0]

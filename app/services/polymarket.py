@@ -101,15 +101,32 @@ class PolymarketClient:
             logger.error(f"Failed to fetch USDC balance from CLOB API: {e}")
             return Decimal("0")
 
-    async def _request(self, url: str, params: Optional[Dict] = None) -> Any:
+    _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+    async def _request(self, url: str, params: Optional[Dict] = None, retries: int = 2) -> Any:
+        """GET JSON. Retries 429 (honouring Retry-After, capped 10 s) and 5xx up to `retries` times.
+
+        Polymarket documents Data API limits as queued rather than rejected (200 req/10 s for
+        /v2/positions, IP-based) but may still answer 429 + Retry-After under heavy load.
+        """
         session = await self._get_session()
-        try:
-            async with session.get(url, params=params, timeout=30) as response:
-                response.raise_for_status()
-                return await response.json()
-        except aiohttp.ClientError as e:
-            logger.error(f"Request failed for {url}: {e}")
-            raise
+        for attempt in range(retries + 1):
+            try:
+                async with session.get(url, params=params, timeout=30) as response:
+                    if response.status in self._RETRY_STATUS and attempt < retries:
+                        ra = response.headers.get("Retry-After")
+                        try:
+                            wait = min(float(ra), 10.0) if ra else 2.0 ** attempt
+                        except ValueError:
+                            wait = 2.0 ** attempt
+                        logger.warning(f"{url}: HTTP {response.status}, retry {attempt + 1}/{retries} in {wait:.1f}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    response.raise_for_status()
+                    return await response.json()
+            except aiohttp.ClientError as e:
+                logger.error(f"Request failed for {url}: {e}")
+                raise
 
     async def _paginate_v2(self, path: str, params: Dict, page: int = 500,
                            max_rows: Optional[int] = None, max_pages: int = 200) -> List[Dict]:
