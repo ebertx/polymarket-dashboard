@@ -352,14 +352,16 @@ WALLET = "0xAbCdEf0000000000000000000000000000000001"
 
 
 def _activity_row(asset, size, price, ts, wallet=WALLET, side="SELL"):
+    """A Data API **v2** /activity row (snake_case; v1 was retired 2026-11-02)."""
     return {
-        "asset": asset,
+        "token_id": asset,
+        "type": "TRADE",
         "side": side,
         "size": size,
         "price": price,
-        "usdcSize": float(size) * float(price),
+        "usdc_size": float(size) * float(price),
         "timestamp": ts,
-        "proxyWallet": wallet,
+        "proxy_wallet": wallet,
     }
 
 
@@ -379,7 +381,7 @@ def test_get_recent_sell_fills_filters_asset_wallet_and_since():
 
     async def fake_request(url, params=None):
         calls.append((url, params))
-        return rows
+        return {"data": rows, "pagination": {"has_more": False, "next_cursor": None}}
 
     client._request = fake_request
     since_ts = now_ts - 3600
@@ -388,11 +390,12 @@ def test_get_recent_sell_fills_filters_asset_wallet_and_since():
 
     assert calls, "activity feed must be requested"
     url, params = calls[0]
-    assert url == "https://data-api.polymarket.com/activity"
+    assert url == "https://data-api.polymarket.com/v2/activity"
     assert params["user"] == WALLET.lower()
     assert params["type"] == "TRADE"
     assert params["side"] == "SELL"
-    assert params["limit"] == 100
+    assert params["start"] == since_ts
+    assert "offset" not in params  # a 400 on v2
 
     # Most recent first, Decimals, only our sells of tok-A since since_ts.
     assert fills == [

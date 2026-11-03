@@ -9,10 +9,12 @@ from py_clob_client.constants import POLYGON
 from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
 
 from app.services.position_filter import own_positions
+from app.services import data_api_v2
 
 logger = logging.getLogger(__name__)
 
-DATA_API_BASE = "https://data-api.polymarket.com"
+# Data API v1 was retired 2026-11-02 (HTTP 410); all reads go to /v2 (see data_api_v2.py).
+DATA_API_BASE = data_api_v2.DATA_API_V2
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 CLOB_API_BASE = "https://clob.polymarket.com"
 
@@ -109,6 +111,25 @@ class PolymarketClient:
             logger.error(f"Request failed for {url}: {e}")
             raise
 
+    async def _paginate_v2(self, path: str, params: Dict, page: int = 500,
+                           max_rows: Optional[int] = None, max_pages: int = 200) -> List[Dict]:
+        """Follow Data API v2 cursors; filters are resent on every page. Raises on failure."""
+        rows: List[Dict] = []
+        cursor = ""
+        for _ in range(max_pages):
+            q = dict(params)
+            q["limit"] = page
+            if cursor:
+                q["cursor"] = cursor
+            env = await self._request(f"{DATA_API_BASE}{path}", q)
+            rows.extend(data_api_v2.unwrap(env))
+            if max_rows is not None and len(rows) >= max_rows:
+                return rows[:max_rows]
+            cursor = data_api_v2.next_cursor(env)
+            if not cursor:
+                return rows
+        raise RuntimeError(f"Data API v2 {path}: more than {max_pages} pages")
+
     async def get_wallet_positions(self) -> List[Dict]:
         """Fetch all positions for the wallet from the data API.
 
@@ -118,12 +139,14 @@ class PolymarketClient:
         Each position echoes its owner in ``proxyWallet``; drop any that aren't
         ours before they reach _sync_positions.
         """
-        url = f"{DATA_API_BASE}/positions"
-        params = {"user": self.wallet_address}
-
         try:
-            data = await self._request(url, params)
-            positions = data if isinstance(data, list) else []
+            # v2 takes one status per call; OPEN + REDEEMABLE + REDEEMABLE_LOST is
+            # what v1 /positions returned (redeemable rows drive resolution logic).
+            pages = []
+            for status in data_api_v2.POSITION_STATUSES:
+                pages.append(await self._paginate_v2(
+                    "/positions", {"user": self.wallet_address, "status": status}))
+            positions = data_api_v2.merge_positions(pages)
             ours, foreign = own_positions(positions, self.wallet_address)
             if foreign:
                 logger.warning(
@@ -204,16 +227,16 @@ class PolymarketClient:
         ``(size, price)`` Decimals, most recent first. Returns ``[]`` on any
         request failure or malformed payload so the caller can fall back.
         """
-        url = f"{DATA_API_BASE}/activity"
         params = {
             "user": self.wallet_address,
             "type": "TRADE",
             "side": "SELL",
-            "limit": 100,
+            "start": int(since_ts),
         }
 
         try:
-            data = await self._request(url, params)
+            data = [data_api_v2.to_v1_activity(r) for r in
+                    await self._paginate_v2("/activity", params, page=100, max_rows=500)]
         except Exception as e:
             logger.warning(f"Activity feed lookup failed for token {token_id}: {e}")
             return []

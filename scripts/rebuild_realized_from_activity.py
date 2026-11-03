@@ -56,7 +56,8 @@ from urllib import parse as urlparse
 from urllib import request as urlrequest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_API = "https://data-api.polymarket.com"
+# Data API v1 retired 2026-11-02 (HTTP 410): /v2 routes, cursor pagination, snake_case rows.
+DATA_API = "https://data-api.polymarket.com/v2"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 DEFAULT_WALLET = "0xf7cc6bd64be987730dc783e6d4787b2d1b802506"
@@ -872,16 +873,33 @@ def fetch_year_start_mark(token_id: str, year: int) -> Optional[Decimal]:
     return dec(best.get("p"))
 
 
+def _data_api_v2():
+    """app/services/data_api_v2.py by file path (this script stays importable without the app stack)."""
+    if "_recon_data_api_v2" in sys.modules:
+        return sys.modules["_recon_data_api_v2"]
+    path = Path(__file__).resolve().parents[1] / "app" / "services" / "data_api_v2.py"
+    spec = importlib.util.spec_from_file_location("_recon_data_api_v2", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def fetch_activity(wallet: str, *, page_size: int = PAGE_SIZE, sleep_s: float = PAGE_SLEEP_S,
                    max_pages: int = 500, log=print) -> List[dict]:
+    """Full wallet activity via Data API v2 (cursor), rows carrying the v1 camelCase keys."""
+    v2 = _data_api_v2()
     rows: List[dict] = []
     seen: set = set()
     dups = 0
-    offset = 0
-    for _ in range(max_pages):
-        qs = urlparse.urlencode({"user": wallet, "limit": page_size, "offset": offset})
-        page = http_json(f"{DATA_API}/activity?{qs}")
-        if not isinstance(page, list) or not page:
+    cursor = ""
+    for n in range(max_pages):
+        params = {"user": wallet, "limit": page_size}
+        if cursor:
+            params["cursor"] = cursor
+        env = http_json(f"{DATA_API}/activity?{urlparse.urlencode(params)}")
+        page = [v2.to_v1_activity(r) for r in v2.unwrap(env)]
+        if not page:
             break
         for row in page:
             key = json.dumps(row, sort_keys=True)
@@ -890,10 +908,10 @@ def fetch_activity(wallet: str, *, page_size: int = PAGE_SIZE, sleep_s: float = 
                 continue
             seen.add(key)
             rows.append(row)
-        log(f"  activity page offset={offset}: {len(page)} rows")
-        if len(page) < page_size:
+        log(f"  activity page {n + 1}: {len(page)} rows")
+        cursor = v2.next_cursor(env)
+        if not cursor:
             break
-        offset += page_size
         time.sleep(sleep_s)
     if dups:
         log(f"  dropped {dups} exact-duplicate rows (page shift during paging)")

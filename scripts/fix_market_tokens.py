@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path.home() / '.claude/credentials/.env')
 
-DATA_API_BASE = 'https://data-api.polymarket.com'
+DATA_API_BASE = 'https://data-api.polymarket.com/v2'  # v1 retired 2026-11-02
 WALLET = os.getenv('POLYMARKET_WALLET_ADDRESS', '0xf7cc6bd64be987730dc783e6d4787b2d1b802506')
 
 
@@ -32,12 +32,30 @@ def get_connection():
 
 
 async def fetch_api_positions():
-    """Fetch current positions from Polymarket API."""
+    """Current positions (Data API v2, OPEN + redeemable), as v1-shaped rows."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "app" / "services" / "data_api_v2.py"
+    spec = importlib.util.spec_from_file_location("_fmt_data_api_v2", path)
+    v2 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(v2)
+    pages = []
     async with aiohttp.ClientSession() as session:
-        url = f'{DATA_API_BASE}/positions'
-        params = {'user': WALLET.lower()}
-        async with session.get(url, params=params, timeout=30) as response:
-            return await response.json()
+        for status in v2.POSITION_STATUSES:
+            rows, cursor = [], ""
+            while True:
+                params = {'user': WALLET.lower(), 'status': status, 'limit': 500}
+                if cursor:
+                    params['cursor'] = cursor
+                async with session.get(f'{DATA_API_BASE}/positions', params=params, timeout=30) as response:
+                    response.raise_for_status()
+                    env = await response.json()
+                rows.extend(v2.unwrap(env))
+                cursor = v2.next_cursor(env)
+                if not cursor:
+                    break
+            pages.append(rows)
+    return v2.merge_positions(pages)
 
 
 def match_positions(api_positions, db_positions):
